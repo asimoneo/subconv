@@ -135,7 +135,9 @@ cat << 'EOF' > /usr/share/luci/menu.d/subconv.json
             "type": "cbi",
             "path": "subconv"
         },
-        "acl": [ "luci-app-subconv" ]
+        "depends": {
+            "acl": [ "luci-app-subconv" ]
+        }
     }
 }
 EOF
