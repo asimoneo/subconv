@@ -1,6 +1,6 @@
 #!/bin/sh
 
-echo "=== Установка SubConv (Стабильная версия) ==="
+echo "=== Установка SubConv (Интегрированная версия) ==="
 
 echo "1. Создание системных директорий..."
 mkdir -p /usr/libexec
@@ -25,7 +25,7 @@ local function log(msg)
     end
 end
 
-log("=== СТАРТ ОБНОВЛЕНИЯ (YAML) ===")
+log("=== СТАРТ ОБНОВЛЕНИЯ (Lua) ===")
 
 if not sub_id then
     log("Ошибка: не указан ID подписки")
@@ -35,7 +35,7 @@ end
 
 uci:load("subconv")
 local url = uci:get("subconv", sub_id, "url")
-local ua = uci:get("subconv", sub_id, "user_agent") or "mihomo"
+local ua = uci:get("subconv", sub_id, "user_agent") or "SubConv/1.0"
 local hwid = uci:get("subconv", sub_id, "hwid")
 local dev_os = uci:get("subconv", sub_id, "device_os") or "OpenWrt"
 local dev_model = uci:get("subconv", sub_id, "device_model") or "OpenWrt Router"
@@ -75,16 +75,56 @@ if #resp == 0 then
     os.exit(1)
 end
 
-local out_path = "/www/" .. sub_id .. ".txt"
-local f_out = io.open(out_path, "w")
-if f_out then
-    f_out:write(resp)
-    f_out:close()
-    log("УСПЕХ: Полный YAML записан в " .. out_path)
-    if f_dbg then f_dbg:close() end
-    os.exit(0)
+local function decodeBase64(data)
+    local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+    data = string.gsub(data, '[^'..b..'=]', '')
+    return (data:gsub('.', function(x)
+        if (x == '=') then return '' end
+        local r,f='',(b:find(x)-1)
+        for i=6,1,-1 do r=r..(f%2^i-f%2^(i-1)>0 and '1' or '0') end
+        return r
+    end):gsub('%d%d%d?%d?%d?%d?%d?%d?', function(x)
+        if (#x ~= 8) then return '' end
+        local c=0
+        for i=1,8 do c=c+(x:sub(i,i)=='1' and 2^(8-i) or 0) end
+        return string.char(c)
+    end))
+end
+
+local decoded = resp
+local maybe_decoded = decodeBase64(resp)
+if maybe_decoded and maybe_decoded:match("://") then
+    decoded = maybe_decoded
+    log("Base64 успешно декодирован")
 else
-    log("Ошибка записи в файл " .. out_path)
+    log("Используем ответ как открытый текст")
+end
+
+local links = {}
+for line in decoded:gmatch("[^\r\n]+") do
+    if line:match("://") then
+        table.insert(links, line)
+    end
+end
+
+log("Найдено узлов прокси: " .. #links)
+
+if #links > 0 then
+    local out_path = "/www/" .. sub_id .. ".txt"
+    local f_out = io.open(out_path, "w")
+    if f_out then
+        f_out:write(table.concat(links, "\n") .. "\n")
+        f_out:close()
+        log("УСПЕХ: записано в " .. out_path)
+        if f_dbg then f_dbg:close() end
+        os.exit(0)
+    else
+        log("Ошибка записи в файл " .. out_path)
+        if f_dbg then f_dbg:close() end
+        os.exit(1)
+    end
+else
+    log("ОШИБКА: не найдено ни одного узла")
     if f_dbg then f_dbg:close() end
     os.exit(1)
 end
