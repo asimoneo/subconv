@@ -5,6 +5,7 @@ echo "=== Установка SubConv (asimoneo/subconv) ==="
 echo "1. Создание системных директорий..."
 mkdir -p /usr/libexec
 mkdir -p /usr/lib/lua/luci/model/cbi
+mkdir -p /usr/lib/lua/luci/controller
 
 echo "2. Создание скрипта обновления (/usr/libexec/subconv-update.sh)..."
 cat << 'EOF' > /usr/libexec/subconv-update.sh
@@ -122,7 +123,16 @@ config_foreach add_cron subscription
 EOF
 chmod +x /usr/libexec/subconv-cron.sh
 
-echo "4. Создание интерфейса LuCI (/usr/lib/lua/luci/model/cbi/subconv.lua)..."
+echo "4. Создание контроллера LuCI (/usr/lib/lua/luci/controller/subconv.lua)..."
+cat << 'EOF' > /usr/lib/lua/luci/controller/subconv.lua
+module("luci.controller.subconv", package.seeall)
+
+function index()
+    entry({"admin", "services", "subconv"}, cbi("subconv"), _("Конвертер подписок (SubConv)"), 90).dependent = true
+end
+EOF
+
+echo "5. Создание интерфейса LuCI (/usr/lib/lua/luci/model/cbi/subconv.lua)..."
 cat << 'EOF' > /usr/lib/lua/luci/model/cbi/subconv.lua
 local uci = require "luci.model.uci".cursor()
 local sys = require "luci.sys"
@@ -291,13 +301,13 @@ end
 return m
 EOF
 
-echo "5. Создание конфигурационного файла UCI (/etc/config/subconv)..."
+echo "6. Создание конфигурационного файла UCI (/etc/config/subconv)..."
 if [ ! -f /etc/config/subconv ]; then
     touch /etc/config/subconv
 fi
 
-echo "6. Очистка кэша LuCI..."
-rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache/
+echo "7. Очистка кэша LuCI..."
+rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache/ /tmp/rpcd-*
 
 echo "=========================================="
 echo "✅ Установка успешно завершена!"
