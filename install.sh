@@ -1,6 +1,6 @@
 #!/bin/sh
 
-echo "=== Установка SubConv (asimoneo/subconv) ==="
+echo "=== Установка SubConv (Стабильная версия) ==="
 
 echo "1. Создание системных директорий..."
 mkdir -p /usr/libexec
@@ -25,7 +25,7 @@ local function log(msg)
     end
 end
 
-log("=== СТАРТ ОБНОВЛЕНИЯ (Lua) ===")
+log("=== СТАРТ ОБНОВЛЕНИЯ (YAML) ===")
 
 if not sub_id then
     log("Ошибка: не указан ID подписки")
@@ -80,7 +80,7 @@ local f_out = io.open(out_path, "w")
 if f_out then
     f_out:write(resp)
     f_out:close()
-    log("УСПЕХ: записано в " .. out_path)
+    log("УСПЕХ: Полный YAML записан в " .. out_path)
     if f_dbg then f_dbg:close() end
     os.exit(0)
 else
@@ -125,7 +125,7 @@ config_foreach add_cron subscription
 EOF
 chmod +x /usr/libexec/subconv-cron.sh
 
-echo "4. Создание меню для новых версий OpenWrt (/usr/share/luci/menu.d/subconv.json)..."
+echo "4. Создание меню для LuCI (/usr/share/luci/menu.d/subconv.json)..."
 cat << 'EOF' > /usr/share/luci/menu.d/subconv.json
 {
     "admin/services/subconv": {
@@ -176,51 +176,156 @@ local dsp = require "luci.dispatcher"
 local m = Map("subconv", translate("Конвертер подписок (SubConv)"), 
     translate("Парсинг подписок и конвертация для HomeProxy."))
 
-local s = m:section(TypedSection, "subscription", translate("Управление подписками"))
-s.anonymous = false
-s.addremove = true
-s.template = "cbi/tblsection"
+local sys_os = "OpenWrt"
+local f_rel = io.open("/etc/openwrt_release", "r")
+if f_rel then
+    local content = f_rel:read("*all")
+    f_rel:close()
+    for line in content:gmatch("[^\r\n]+") do
+        if line:match("^DISTRIB_ID=") then
+            sys_os = line:match("DISTRIB_ID=['\"]?(.-)['\"]?$")
+        end
+        if line:match("^DISTRIB_RELEASE=") then
+            local rel = line:match("DISTRIB_RELEASE=['\"]?(.-)['\"]?$")
+            if rel then sys_os = sys_os .. " " .. rel end
+        end
+    end
+end
 
-local enabled = s:option(Flag, "enabled", translate("Вкл"))
-enabled.rmempty = false
+local sys_model = "OpenWrt Router"
+local f_mod = io.open("/tmp/sysinfo/model", "r")
+if f_mod then
+    local m_val = f_mod:read("*all")
+    f_mod:close()
+    if m_val and m_val ~= "" then
+        sys_model = m_val:gsub("^%s+", ""):gsub("%s+$", "")
+    end
+end
 
-local url = s:option(Value, "url", translate("URL подписки"))
-url.rmempty = false
+local sys_hwid = ""
+local f_hwid = io.open("/etc/machine-id", "r")
+if f_hwid then
+    sys_hwid = f_hwid:read("*all"):gsub("^%s+", ""):gsub("%s+$", "")
+    f_hwid:close()
+end
+if sys_hwid == "" then
+    sys_hwid = sys.exec("uci get network.lan.mac 2>/dev/null | tr -d ':'"):gsub("^%s+", ""):gsub("%s+$", "")
+end
+if sys_hwid == "" then
+    sys_hwid = "openwrt-router-default"
+end
 
-local ua = s:option(Value, "user_agent", translate("User-Agent"))
-ua.default = "mihomo"
+local new_id = http.formvalue("cbid.subconv.new.sub_id")
+local new_url = http.formvalue("cbid.subconv.new.url")
+local new_ua = http.formvalue("cbid.subconv.new.user_agent")
+local new_hwid = http.formvalue("cbid.subconv.new.hwid")
+local new_dev_os = http.formvalue("cbid.subconv.new.device_os")
+local new_dev_model = http.formvalue("cbid.subconv.new.device_model")
+local do_add = http.formvalue("cbid.subconv.new._add")
 
-local hwid = s:option(Value, "hwid", translate("HWID"))
+if do_add and new_id and new_id ~= "" and new_url and new_url ~= "" then
+    new_id = string.gsub(new_id, "[^%w_]", "_")
+    
+    if not new_ua or new_ua == "" then new_ua = "mihomo" end
+    if not new_hwid or new_hwid == "" then new_hwid = sys_hwid end
+    if not new_dev_os or new_dev_os == "" then new_dev_os = sys_os end
+    if not new_dev_model or new_dev_model == "" then new_dev_model = sys_model end
 
-local interval = s:option(Value, "interval", translate("Интервал (мин)"))
-interval.datatype = "uinteger"
-interval.default = "1440"
+    uci:section("subconv", "subscription", new_id, {
+        enabled = "1",
+        url = new_url,
+        user_agent = new_ua,
+        hwid = new_hwid,
+        device_os = new_dev_os,
+        device_model = new_dev_model,
+        interval = "1440"
+    })
+    uci:delete("subconv", "new", "sub_id")
+    uci:delete("subconv", "new", "url")
+    uci:delete("subconv", "new", "user_agent")
+    uci:delete("subconv", "new", "hwid")
+    uci:delete("subconv", "new", "device_os")
+    uci:delete("subconv", "new", "device_model")
+    uci:commit("subconv")
 
-local link = s:option(DummyValue, "_link", translate("Локальная ссылка"))
-function link.cfgvalue(self, section)
+    local ret = sys.call("/usr/libexec/subconv-update.sh " .. new_id)
+    if ret == 0 then
+        m.message = "✅ УСПЕХ: Подписка [" .. new_id .. "] добавлена, файл /www/" .. new_id .. ".txt заполнен."
+    else
+        m.message = "❌ ОШИБКА: Не удалось получить узлы для [" .. new_id .. "]. См. /www/subconv_debug.txt"
+    end
+end
+
+local s_add = m:section(NamedSection, "new", "dummy", translate("Добавить новую подписку"))
+s_add.addremove = false
+
+local f_id = s_add:option(Value, "sub_id", translate("Имя подписки (ID)"))
+f_id.rmempty = true
+f_id.description = translate("Уникальное имя. Имя файла будет совпадать ({name}.txt).")
+f_id.cfgvalue = function() return "" end
+
+local f_url = s_add:option(Value, "url", translate("URL подписки"))
+f_url.rmempty = true
+f_url.cfgvalue = function() return "" end
+
+local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
+f_ua.default = "mihomo"
+f_ua.cfgvalue = function() return "mihomo" end
+
+local f_hwid = s_add:option(Value, "hwid", translate("HWID устройства"))
+f_hwid.default = sys_hwid
+f_hwid.cfgvalue = function() return sys_hwid end
+
+local f_dev_os = s_add:option(Value, "device_os", translate("OS Устройства"))
+f_dev_os.default = sys_os
+f_dev_os.cfgvalue = function() return sys_os end
+
+local f_dev_model = s_add:option(Value, "device_model", translate("Модель Устройства"))
+f_dev_model.default = sys_model
+f_dev_model.cfgvalue = function() return sys_model end
+
+local btn_add = s_add:option(Button, "_add", translate("Добавить подписку"))
+btn_add.inputstyle = "add"
+
+local s_list = m:section(TypedSection, "subscription", translate("Активные подписки"))
+s_list.addremove = false
+s_list.anonymous = false
+s_list.template = "cbi/tblsection"
+
+s_list:option(Flag, "enabled", translate("Вкл")).rmempty = false
+s_list:option(Value, "url", translate("URL")).rmempty = false
+s_list:option(Value, "user_agent", translate("User-Agent")).rmempty = false
+s_list:option(Value, "hwid", translate("HWID")).rmempty = false
+s_list:option(Value, "device_os", translate("ОС")).rmempty = false
+s_list:option(Value, "device_model", translate("Модель")).rmempty = false
+
+local list_interval = s_list:option(Value, "interval", translate("Мин."))
+list_interval.datatype = "uinteger"
+list_interval.default = "1440"
+
+local list_link = s_list:option(DummyValue, "_link", translate("Локальная ссылка"))
+function list_link.cfgvalue(self, section)
     return "http://127.0.0.1/" .. section .. ".txt"
 end
 
-local btn_upd = s:option(Button, "_update", translate("Обновить"))
+local btn_upd = s_list:option(Button, "_update", translate("Обновить"))
 btn_upd.inputstyle = "apply"
 function btn_upd.write(self, section)
     local r = sys.call("/usr/libexec/subconv-update.sh " .. section)
     if r == 0 then
         m.message = "✅ Подписка [" .. section .. "] успешно обновлена."
     else
-        m.message = "❌ Ошибка при обновлении [" .. section .. "]. См. /www/subconv_debug.txt"
+        m.message = "❌ Ошибка при обновлении подписки [" .. section .. "]. См. /www/subconv_debug.txt"
     end
 end
 
-function s.create(self, section)
-    local created = TypedSection.create(self, section)
-    if created then
-        uci:set("subconv", created, "enabled", "1")
-        uci:set("subconv", created, "user_agent", "mihomo")
-        uci:set("subconv", created, "interval", "1440")
-        uci:commit("subconv")
-    end
-    return created
+local btn_del = s_list:option(Button, "_delete", translate("Удалить"))
+btn_del.inputstyle = "remove"
+function btn_del.write(self, section)
+    uci:delete("subconv", section)
+    uci:commit("subconv")
+    os.execute("rm -f /www/" .. section .. ".txt")
+    http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
 function m.on_after_commit(self)
