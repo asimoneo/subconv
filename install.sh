@@ -65,7 +65,7 @@ end
 
 uci:load("subconv")
 local url = uci:get("subconv", sub_id, "url")
-local ua = uci:get("subconv", sub_id, "user_agent") or "Happ/SC"
+local ua = uci:get("subconv", sub_id, "user_agent") or "sing-box"
 local hwid = uci:get("subconv", sub_id, "hwid")
 local dev_os = uci:get("subconv", sub_id, "device_os") or "OpenWrt"
 local dev_model = uci:get("subconv", sub_id, "device_model") or "OpenWrt Router"
@@ -286,7 +286,7 @@ local f_url = s_add:option(Value, "url", translate("URL подписки"))
 f_url.rmempty = true
 
 local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
-f_ua.default = "Happ/SC"
+f_ua.default = "sing-box"
 f_ua.description = translate("влияет на выдачу, например Happ / sing-box / и т.д.")
 f_ua.rmempty = true
 
@@ -307,7 +307,7 @@ btn_add.inputstyle = "add"
 function btn_add.write(self, section)
     local new_id = m:formvalue("cbid.subconv.add.sub_id")
     local new_url = m:formvalue("cbid.subconv.add.url")
-    local new_ua = m:formvalue("cbid.subconv.add.user_agent") or "Happ/SC"
+    local new_ua = m:formvalue("cbid.subconv.add.user_agent") or "sing-box"
     local new_hwid_val = m:formvalue("cbid.subconv.add.hwid") or sys_hwid
     local new_os = m:formvalue("cbid.subconv.add.device_os") or sys_os
     local new_model = m:formvalue("cbid.subconv.add.device_model") or sys_model
