@@ -1,6 +1,6 @@
 #!/bin/sh
 
-echo "=== Установка SubConv (Финальная версия с формой добавления) ==="
+echo "=== Установка SubConv (Финальная версия с фиксированной формой) ==="
 
 echo "1. Создание системных директорий..."
 mkdir -p /usr/libexec
@@ -216,30 +216,30 @@ local m = Map("subconv", translate("Конвертер подписок (SubConv
     translate("Парсинг подписок и конвертация для HomeProxy."))
 
 -- Секция ручного добавления подписки (гарантированно отображается)
-local s_add = m:section(NamedSection, "new_sub", "dummy", translate("Добавить новую подписку"))
+local s_add = m:section(NamedSection, "settings", "global", translate("Добавить новую подписку"))
 s_add.addremove = false
 
-local f_id = s_add:option(Value, "sub_id", translate("Имя подписки (ID)"))
+local f_id = s_add:option(Value, "new_id", translate("Имя подписки (ID)"))
 f_id.rmempty = true
 f_id.description = translate("Только латиница и цифры (например: my_sub). Файл сохранится как /www/{ID}.txt")
 
-local f_url = s_add:option(Value, "url", translate("URL подписки"))
+local f_url = s_add:option(Value, "new_url", translate("URL подписки"))
 f_url.rmempty = true
 
-local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
+local f_ua = s_add:option(Value, "new_ua", translate("User-Agent"))
 f_ua.default = "mihomo"
 
-local f_interval = s_add:option(Value, "interval", translate("Интервал (мин)"))
+local f_interval = s_add:option(Value, "new_interval", translate("Интервал (мин)"))
 f_interval.datatype = "uinteger"
 f_interval.default = "1440"
 
-local btn_add = s_add:option(Button, "_add", translate("Добавить"))
+local btn_add = s_add:option(Button, "_add", translate("Добавить и обновить"))
 btn_add.inputstyle = "add"
 function btn_add.write(self, section)
-    local new_id = http.formvalue("cbid.subconv.new_sub.sub_id")
-    local new_url = http.formvalue("cbid.subconv.new_sub.url")
-    local new_ua = http.formvalue("cbid.subconv.new_sub.user_agent") or "mihomo"
-    local new_interval = http.formvalue("cbid.subconv.new_sub.interval") or "1440"
+    local new_id = http.formvalue("cbid.subconv.settings.new_id")
+    local new_url = http.formvalue("cbid.subconv.settings.new_url")
+    local new_ua = http.formvalue("cbid.subconv.settings.new_ua") or "mihomo"
+    local new_interval = http.formvalue("cbid.subconv.settings.new_interval") or "1440"
 
     if new_id and new_id ~= "" and new_url and new_url ~= "" then
         new_id = string.gsub(new_id, "[^%w_]", "_")
@@ -271,8 +271,9 @@ function btn_add.write(self, section)
         })
         uci:commit("subconv")
 
-        uci:delete("subconv", "new_sub", "sub_id")
-        uci:delete("subconv", "new_sub", "url")
+        -- Очищаем поля формы
+        uci:set("subconv", "settings", "new_id", "")
+        uci:set("subconv", "settings", "new_url", "")
         uci:commit("subconv")
 
         local r = sys.call("/usr/libexec/subconv-update.sh " .. new_id)
@@ -293,7 +294,7 @@ s_list.addremove = false
 s_list.template = "cbi/tblsection"
 
 function s_list.filter(self, section)
-    if section == "new_sub" then
+    if section == "settings" then
         return false
     end
     return TypedSection.filter(self, section)
