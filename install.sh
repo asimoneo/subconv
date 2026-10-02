@@ -1,7 +1,7 @@
 #!/bin/sh
 
 echo "========================================================="
-echo "        Установка SubConv (Конвертер подписок)           "
+echo "        Установка Subconv                                "
 echo "========================================================="
 echo "Выберите действие:"
 echo " 1) Установить / Обновить плагин"
@@ -11,7 +11,7 @@ printf "Ваш выбор [1]: "
 read action
 
 if [ "$action" = "2" ]; then
-    echo "Удаление SubConv..."
+    echo "Удаление Subconv..."
     rm -f /usr/libexec/subconv-update.sh
     rm -f /usr/libexec/subconv-cron.sh
     rm -f /usr/lib/lua/luci/controller/subconv.lua
@@ -65,7 +65,7 @@ end
 
 uci:load("subconv")
 local url = uci:get("subconv", sub_id, "url")
-local ua = uci:get("subconv", sub_id, "user_agent") or "SubConv/1.0"
+local ua = uci:get("subconv", sub_id, "user_agent") or "Happ/SC"
 local hwid = uci:get("subconv", sub_id, "hwid")
 local dev_os = uci:get("subconv", sub_id, "device_os") or "OpenWrt"
 local dev_model = uci:get("subconv", sub_id, "device_model") or "OpenWrt Router"
@@ -199,7 +199,7 @@ echo "4. Создание меню для LuCI (/usr/share/luci/menu.d/subconv.j
 cat << 'EOF' > /usr/share/luci/menu.d/subconv.json
 {
     "admin/services/subconv": {
-        "title": "Конвертер подписок (SubConv)",
+        "title": "Subconv",
         "order": 90,
         "action": {
             "type": "cbi",
@@ -216,7 +216,7 @@ echo "5. Создание файла прав доступа rpcd (/usr/share/rp
 cat << 'EOF' > /usr/share/rpcd/acl.d/subconv.json
 {
     "luci-app-subconv": {
-        "description": "Grant access to SubConv",
+        "description": "Grant access to Subconv",
         "read": {
             "uci": [ "subconv" ]
         },
@@ -231,7 +231,7 @@ echo "6. Создание классического контроллера LuCI
 cat << 'EOF' > /usr/lib/lua/luci/controller/subconv.lua
 module("luci.controller.subconv", package.seeall)
 function index()
-    entry({"admin", "services", "subconv"}, cbi("subconv"), _("Конвертер подписок (SubConv)"), 90).dependent = true
+    entry({"admin", "services", "subconv"}, cbi("subconv"), _("Subconv"), 90).dependent = true
 end
 EOF
 
@@ -242,7 +242,7 @@ local sys = require "luci.sys"
 local http = require "luci.http"
 local dsp = require "luci.dispatcher"
 
-local m = Map("subconv", translate("Конвертер подписок (SubConv)"), translate("Парсинг YAML-подписок и конвертация в списки для HomeProxy."))
+local m = Map("subconv", translate("Subconv"), translate("Парсинг YAML-подписок и конвертация в списки для HomeProxy."))
 
 local sys_os = "OpenWrt"
 local f_rel = io.open("/etc/openwrt_release", "r")
@@ -286,7 +286,8 @@ local f_url = s_add:option(Value, "url", translate("URL подписки"))
 f_url.rmempty = true
 
 local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
-f_ua.default = "SubConv/1.0"
+f_ua.default = "Happ/SC"
+f_ua.description = translate("влияет на выдачу, например Happ / sing-box / и т.д.")
 f_ua.rmempty = true
 
 local f_hwid_opt = s_add:option(Value, "hwid", translate("HWID устройства"))
@@ -306,7 +307,7 @@ btn_add.inputstyle = "add"
 function btn_add.write(self, section)
     local new_id = m:formvalue("cbid.subconv.add.sub_id")
     local new_url = m:formvalue("cbid.subconv.add.url")
-    local new_ua = m:formvalue("cbid.subconv.add.user_agent") or "SubConv/1.0"
+    local new_ua = m:formvalue("cbid.subconv.add.user_agent") or "Happ/SC"
     local new_hwid_val = m:formvalue("cbid.subconv.add.hwid") or sys_hwid
     local new_os = m:formvalue("cbid.subconv.add.device_os") or sys_os
     local new_model = m:formvalue("cbid.subconv.add.device_model") or sys_model
@@ -391,5 +392,5 @@ rm -rf /tmp/luci-* /tmp/rpcd-* /tmp/state/*
 
 echo "=========================================="
 echo "✅ Установка успешно завершена!"
-echo "Перейдите в веб-интерфейс LuCI -> Службы -> Конвертер подписок (SubConv)"
+echo "Перейдите в веб-интерфейс LuCI -> Службы -> Subconv"
 echo "=========================================="
