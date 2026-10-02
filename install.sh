@@ -1,6 +1,6 @@
 #!/bin/sh
 
-echo "=== Установка SubConv (Исправленный интерфейс) ==="
+echo "=== Установка SubConv (Стабильная форма добавления) ==="
 
 echo "1. Создание системных директорий..."
 mkdir -p /usr/libexec
@@ -214,40 +214,117 @@ local sys = require "luci.sys"
 local m = Map("subconv", translate("Конвертер подписок (SubConv)"), 
     translate("Парсинг подписок и конвертация для HomeProxy."))
 
-local s = m:section(TypedSection, "subscription", translate("Активные подписки"))
-s.anonymous = true
-s.addremove = true
-s.template = "cbi/tblsection"
+-- Секция добавления новой подписки
+local s_add = m:section(NamedSection, "new", "subscription", translate("Добавить новую подписку"))
+s_add.addremove = false
 
-local enabled = s:option(Flag, "enabled", translate("Вкл"))
-enabled.rmempty = false
+local f_id = s_add:option(Value, "sub_id", translate("Имя подписки (ID)"))
+f_id.rmempty = true
+f_id.description = translate("Уникальное имя (например: my_sub). Файл будет сохранен как /www/{ID}.txt")
 
-local url = s:option(Value, "url", translate("URL подписки"))
-url.rmempty = false
+local f_url = s_add:option(Value, "url", translate("URL подписки"))
+f_url.rmempty = true
 
-local ua = s:option(Value, "user_agent", translate("User-Agent"))
-ua.default = "mihomo"
+local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
+f_ua.default = "mihomo"
 
-local hwid = s:option(Value, "hwid", translate("HWID"))
+local f_interval = s_add:option(Value, "interval", translate("Интервал (мин)"))
+f_interval.datatype = "uinteger"
+f_interval.default = "1440"
 
-local interval = s:option(Value, "interval", translate("Мин."))
-interval.datatype = "uinteger"
-interval.default = "1440"
+local btn_add = s_add:option(Button, "_add", translate("Добавить подписку"))
+btn_add.inputstyle = "add"
+function btn_add.write(self, section)
+    local new_id = m:formvalue("cbid.subconv.new.sub_id")
+    local new_url = m:formvalue("cbid.subconv.new.url")
+    local new_ua = m:formvalue("cbid.subconv.new.user_agent") or "mihomo"
+    local new_interval = m:formvalue("cbid.subconv.new.interval") or "1440"
 
-local link = s:option(DummyValue, "_link", translate("Локальная ссылка"))
+    if new_id and new_id ~= "" and new_url and new_url ~= "" then
+        new_id = string.gsub(new_id, "[^%w_]", "_")
+        
+        local sys_os = "OpenWrt"
+        local f_rel = io.open("/etc/openwrt_release", "r")
+        if f_rel then
+            local content = f_rel:read("*all")
+            f_rel:close()
+            for line in content:gmatch("[^\r\n]+") do
+                if line:match("^DISTRIB_ID=") then sys_os = line:match("DISTRIB_ID=['\"]?(.-)['\"]?$") end
+            end
+        end
+        local sys_hwid = ""
+        local f_hwid = io.open("/etc/machine-id", "r")
+        if f_hwid then
+            sys_hwid = f_hwid:read("*all"):gsub("%s+", ""):gsub("%s+$", "")
+            f_hwid:close()
+        end
+        if sys_hwid == "" then sys_hwid = "openwrt-router-default" end
+
+        uci:section("subconv", "subscription", new_id, {
+            enabled = "1",
+            url = new_url,
+            user_agent = new_ua,
+            hwid = sys_hwid,
+            device_os = sys_os,
+            interval = new_interval
+        })
+        uci:commit("subconv")
+
+        uci:delete("subconv", "new", "sub_id")
+        uci:delete("subconv", "new", "url")
+        uci:commit("subconv")
+
+        local r = sys.call("/usr/libexec/subconv-update.sh " .. new_id)
+        if r == 0 then
+            m.message = "✅ Подписка [" .. new_id .. "] успешно добавлена и обновлена!"
+        else
+            m.message = "⚠️ Подписка добавлена, но при первом обновлении произошла ошибка. См. /www/subconv_debug.txt"
+        end
+    else
+        m.message = "❌ Ошибка: Укажите имя (ID) и URL подписки."
+    end
+end
+
+-- Секция списка активных подписок
+local s_list = m:section(TypedSection, "subscription", translate("Активные подписки"))
+s_list.anonymous = false
+s_list.addremove = false
+s_list.template = "cbi/tblsection"
+
+function s_list.filter(self, section)
+    if section == "new" then
+        return false
+    end
+    return TypedSection.filter(self, section)
+end
+
+s_list:option(Flag, "enabled", translate("Вкл")).rmempty = false
+s_list:option(Value, "url", translate("URL")).rmempty = false
+s_list:option(Value, "user_agent", translate("User-Agent")).rmempty = false
+s_list:option(Value, "interval", translate("Мин.")).datatype = "uinteger"
+
+local link = s_list:option(DummyValue, "_link", translate("Локальная ссылка"))
 function link.cfgvalue(self, section)
     return "http://127.0.0.1/" .. section .. ".txt"
 end
 
-local btn_upd = s:option(Button, "_update", translate("Обновить"))
+local btn_upd = s_list:option(Button, "_update", translate("Обновить"))
 btn_upd.inputstyle = "apply"
 function btn_upd.write(self, section)
     local r = sys.call("/usr/libexec/subconv-update.sh " .. section)
     if r == 0 then
-        m.message = "✅ Подписка успешно обновлена."
+        m.message = "✅ Подписка [" .. section .. "] успешно обновлена."
     else
         m.message = "❌ Ошибка при обновлении. См. /www/subconv_debug.txt"
     end
+end
+
+local btn_del = s_list:option(Button, "_delete", translate("Удалить"))
+btn_del.inputstyle = "remove"
+function btn_del.write(self, section)
+    uci:delete("subconv", section)
+    uci:commit("subconv")
+    os.execute("rm -f /www/" .. section .. ".txt")
 end
 
 function m.on_after_commit(self)
@@ -258,8 +335,13 @@ return m
 EOF
 
 echo "8. Создание конфигурационного файла UCI (/etc/config/subconv)..."
-if [ ! -f /etc/config/subconv ]; then
-    touch /etc/config/subconv
+if [ ! -f /etc/config/subconv ] || [ ! -s /etc/config/subconv ]; then
+    cat << 'EOF' > /etc/config/subconv
+config subscription 'new'
+    option enabled '1'
+    option user_agent 'mihomo'
+    option interval '1440'
+EOF
 fi
 
 echo "9. Очистка кэша LuCI..."
