@@ -331,7 +331,7 @@ function btn_add.write(self, section)
 end
 
 local s_list = m:section(TypedSection, "subscription", translate("Активные подписки"))
-s_list.anonymous = false
+s_list.anonymous = true
 s_list.addremove = false
 s_list.template = "cbi/tblsection"
 
@@ -379,6 +379,10 @@ if [ ! -f /etc/config/subconv ]; then
     cat << 'EOF' > /etc/config/subconv
 config global 'add'
 EOF
+else
+    if ! grep -q "config global 'add'" /etc/config/subconv; then
+        echo "config global 'add'" >> /etc/config/subconv
+    fi
 fi
 
 echo "9. Очистка кэша LuCI..."
