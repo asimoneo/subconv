@@ -1,6 +1,6 @@
 #!/bin/sh
 
-echo "=== Установка SubConv (Финальная версия с фиксированной формой) ==="
+echo "=== Установка SubConv (С инициализацией формы) ==="
 
 echo "1. Создание системных директорий..."
 mkdir -p /usr/libexec
@@ -215,7 +215,6 @@ local http = require "luci.http"
 local m = Map("subconv", translate("Конвертер подписок (SubConv)"), 
     translate("Парсинг подписок и конвертация для HomeProxy."))
 
--- Секция ручного добавления подписки (гарантированно отображается)
 local s_add = m:section(NamedSection, "settings", "global", translate("Добавить новую подписку"))
 s_add.addremove = false
 
@@ -271,7 +270,6 @@ function btn_add.write(self, section)
         })
         uci:commit("subconv")
 
-        -- Очищаем поля формы
         uci:set("subconv", "settings", "new_id", "")
         uci:set("subconv", "settings", "new_url", "")
         uci:commit("subconv")
@@ -287,7 +285,6 @@ function btn_add.write(self, section)
     end
 end
 
--- Секция таблицы активных подписок
 local s_list = m:section(TypedSection, "subscription", translate("Активные подписки"))
 s_list.anonymous = false
 s_list.addremove = false
@@ -336,10 +333,12 @@ end
 return m
 EOF
 
-echo "8. Создание конфигурационного файла UCI (/etc/config/subconv)..."
-if [ ! -f /etc/config/subconv ]; then
-    touch /etc/config/subconv
-fi
+echo "8. Создание конфигурационного файла UCI (/etc/config/subconv) с секцией настроек..."
+cat << 'EOF' > /etc/config/subconv
+config global 'settings'
+    option new_ua 'mihomo'
+    option new_interval '1440'
+EOF
 
 echo "9. Очистка кэша LuCI..."
 rm -rf /tmp/luci-* /tmp/rpcd-* /tmp/state/*
