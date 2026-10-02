@@ -1,6 +1,36 @@
 #!/bin/sh
 
-echo "=== Установка SubConv (OpenWrt 25.12 Compatible) ==="
+echo "========================================================="
+echo "        Установка SubConv (Конвертер подписок)           "
+echo "========================================================="
+echo "Выберите действие:"
+echo " 1) Установить / Обновить плагин"
+echo " 2) Полностью УДАЛИТЬ плагин и все его файлы"
+echo "========================================================="
+printf "Ваш выбор [1]: "
+read action
+
+if [ "$action" = "2" ]; then
+    echo "Удаление SubConv..."
+    rm -f /usr/libexec/subconv-update.sh
+    rm -f /usr/libexec/subconv-cron.sh
+    rm -f /usr/lib/lua/luci/controller/subconv.lua
+    rm -f /usr/lib/lua/luci/model/cbi/subconv.lua
+    rm -f /usr/share/luci/menu.d/subconv.json
+    rm -f /usr/share/rpcd/acl.d/subconv.json
+    rm -f /etc/config/subconv
+    rm -f /www/subconv_debug.txt
+    
+    if [ -f /etc/crontabs/root ]; then
+        sed -i '/subconv-update.sh/d' /etc/crontabs/root
+        /etc/init.d/cron restart
+    fi
+    
+    rm -rf /tmp/luci-* /tmp/rpcd-* /tmp/state/*
+    /etc/init.d/rpcd restart
+    echo "✅ Плагин, его файлы и интерфейс полностью удалены!"
+    exit 0
+fi
 
 echo "1. Создание системных директорий..."
 mkdir -p /usr/libexec
@@ -9,7 +39,7 @@ mkdir -p /usr/lib/lua/luci/controller
 mkdir -p /usr/share/luci/menu.d
 mkdir -p /usr/share/rpcd/acl.d
 
-echo "2. Создание скрипта обновления (/usr/libexec/subconv-update.sh)..."
+echo "2. Создание скрипта обновления (с логикой Geodema)..."
 cat << 'EOF' > /usr/libexec/subconv-update.sh
 #!/usr/bin/lua
 local uci = require "luci.model.uci".cursor()
@@ -206,7 +236,7 @@ function index()
 end
 EOF
 
-echo "7. Создание интерфейса LuCI (/usr/lib/lua/luci/model/cbi/subconv.lua)..."
+echo "7. Создание ровного интерфейса LuCI (/usr/lib/lua/luci/model/cbi/subconv.lua)..."
 cat << 'EOF' > /usr/lib/lua/luci/model/cbi/subconv.lua
 local uci = require "luci.model.uci".cursor()
 local sys = require "luci.sys"
@@ -215,14 +245,32 @@ local m = Map("subconv", translate("Конвертер подписок (SubConv
     translate("Парсинг подписок и конвертация для HomeProxy."))
 
 local s = m:section(TypedSection, "subscription", translate("Управление подписками"))
-s.anonymous = false
+s.anonymous = true  -- Убирает системное кривое поле ввода ID
 s.addremove = true
 s.template = "cbi/tblsection"
 
-s:option(Flag, "enabled", translate("Вкл"))
-s:option(Value, "url", translate("URL подписки"))
-s:option(Value, "user_agent", translate("User-Agent"))
-s:option(Value, "interval", translate("Интервал"))
+function s.create(self, section)
+    local created = TypedSection.create(self, section)
+    if created then
+        uci:set("subconv", created, "enabled", "1")
+        uci:set("subconv", created, "user_agent", "mihomo")
+        uci:set("subconv", created, "interval", "1440")
+        uci:commit("subconv")
+    end
+    return created
+end
+
+s:option(Flag, "enabled", translate("Вкл")).rmempty = false
+
+local url = s:option(Value, "url", translate("URL подписки"))
+url.rmempty = false
+
+local ua = s:option(Value, "user_agent", translate("User-Agent"))
+ua.rmempty = false
+
+local interval = s:option(Value, "interval", translate("Мин."))
+interval.datatype = "uinteger"
+interval.rmempty = false
 
 local link = s:option(DummyValue, "_link", translate("Локальная ссылка"))
 function link.cfgvalue(self, section)
@@ -234,7 +282,7 @@ btn_upd.inputstyle = "apply"
 function btn_upd.write(self, section)
     local r = sys.call("/usr/libexec/subconv-update.sh " .. section)
     if r == 0 then
-        m.message = "✅ Подписка [" .. section .. "] успешно обновлена."
+        m.message = "✅ Подписка успешно обновлена."
     else
         m.message = "❌ Ошибка при обновлении. См. /www/subconv_debug.txt"
     end
@@ -247,14 +295,10 @@ end
 return m
 EOF
 
-echo "8. Создание конфигурационного файла UCI (/etc/config/subconv) с начальным примером..."
-cat << 'EOF' > /etc/config/subconv
-config subscription 'my_sub'
-    option enabled '1'
-    option url 'https://example.com/sub'
-    option user_agent 'mihomo'
-    option interval '1440'
-EOF
+echo "8. Создание конфигурационного файла UCI (/etc/config/subconv)..."
+if [ ! -f /etc/config/subconv ]; then
+    touch /etc/config/subconv
+fi
 
 echo "9. Очистка кэша LuCI..."
 rm -rf /tmp/luci-* /tmp/rpcd-* /tmp/state/*
