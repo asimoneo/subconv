@@ -6,6 +6,8 @@ echo "1. Создание системных директорий..."
 mkdir -p /usr/libexec
 mkdir -p /usr/lib/lua/luci/model/cbi
 mkdir -p /usr/lib/lua/luci/controller
+mkdir -p /usr/share/luci/menu.d
+mkdir -p /usr/share/rpcd/acl.d
 
 echo "2. Создание скрипта обновления (/usr/libexec/subconv-update.sh)..."
 cat << 'EOF' > /usr/libexec/subconv-update.sh
@@ -123,7 +125,37 @@ config_foreach add_cron subscription
 EOF
 chmod +x /usr/libexec/subconv-cron.sh
 
-echo "4. Создание контроллера LuCI (/usr/lib/lua/luci/controller/subconv.lua)..."
+echo "4. Создание меню для новых версий OpenWrt (/usr/share/luci/menu.d/subconv.json)..."
+cat << 'EOF' > /usr/share/luci/menu.d/subconv.json
+{
+    "admin/services/subconv": {
+        "title": "Конвертер подписок (SubConv)",
+        "order": 90,
+        "action": {
+            "type": "cbi",
+            "path": "subconv"
+        },
+        "acl": [ "luci-app-subconv" ]
+    }
+}
+EOF
+
+echo "5. Создание файла прав доступа rpcd (/usr/share/rpcd/acl.d/subconv.json)..."
+cat << 'EOF' > /usr/share/rpcd/acl.d/subconv.json
+{
+    "luci-app-subconv": {
+        "description": "Grant access to SubConv",
+        "read": {
+            "uci": [ "subconv" ]
+        },
+        "write": {
+            "uci": [ "subconv" ]
+        }
+    }
+}
+EOF
+
+echo "6. Создание классического контроллера LuCI (/usr/lib/lua/luci/controller/subconv.lua)..."
 cat << 'EOF' > /usr/lib/lua/luci/controller/subconv.lua
 module("luci.controller.subconv", package.seeall)
 
@@ -132,7 +164,7 @@ function index()
 end
 EOF
 
-echo "5. Создание интерфейса LuCI (/usr/lib/lua/luci/model/cbi/subconv.lua)..."
+echo "7. Создание интерфейса LuCI (/usr/lib/lua/luci/model/cbi/subconv.lua)..."
 cat << 'EOF' > /usr/lib/lua/luci/model/cbi/subconv.lua
 local uci = require "luci.model.uci".cursor()
 local sys = require "luci.sys"
@@ -301,13 +333,14 @@ end
 return m
 EOF
 
-echo "6. Создание конфигурационного файла UCI (/etc/config/subconv)..."
+echo "8. Создание конфигурационного файла UCI (/etc/config/subconv)..."
 if [ ! -f /etc/config/subconv ]; then
     touch /etc/config/subconv
 fi
 
-echo "7. Очистка кэша LuCI..."
-rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache/ /tmp/rpcd-*
+echo "9. Очистка кэша LuCI..."
+rm -rf /tmp/luci-* /tmp/rpcd-* /tmp/state/*
+/etc/init.d/rpcd restart
 
 echo "=========================================="
 echo "✅ Установка успешно завершена!"
