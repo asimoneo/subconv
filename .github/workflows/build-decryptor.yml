@@ -12,6 +12,11 @@ jobs:
         with:
           repository: amurcanov/happ-decrypt-universal
 
+      - name: Fix Rust edition version
+        run: |
+          sed -i 's/edition = "2026"/edition = "2021"/g' Cargo.toml
+          sed -i 's/edition = "2024"/edition = "2021"/g' Cargo.toml
+
       - name: Compile using rust-musl-cross
         run: |
           docker run --rm -v ${{ github.workspace }}:/home/rust/src messense/rust-musl-cross:aarch64-musl cargo build --release
