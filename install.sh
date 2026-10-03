@@ -1,7 +1,7 @@
 #!/bin/sh
 
 echo "========================================================="
-echo "        Установка Subconv (Проверка ID + Описания)       "
+echo "        Установка Subconv (Финальная сборка)             "
 echo "========================================================="
 echo "Выберите действие:"
 echo " 1) Установить / Обновить плагин"
@@ -154,7 +154,11 @@ else
     else
         local links = {}
         for line in decoded:gmatch("[^\r\n]+") do
-            if line:match("://") then table.insert(links, line) end
+            -- Жесткая очистка строки от невидимых символов и пробелов
+            line = line:match("^%s*(.-)%s*$")
+            if line and line:match("://") then 
+                table.insert(links, line) 
+            end
         end
 
         if #links > 0 then
@@ -292,11 +296,11 @@ f_id.description = translate("Только латиница без пробел�
 f_id.rmempty = true
 
 local f_url = s_add:option(Value, "url", translate("URL подписки"))
-f_url.description = translate("Прямая ссылка от провайдера (поддерживаются URI, YAML и JSON форматы).")
+f_url.description = translate("Прямая ссылка от провайдера (поддерживаются форматы URI, YAML и JSON).")
 f_url.rmempty = true
 
 local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
-f_ua.description = translate("Маскировка клиента. Некоторые провайдеры отдают узлы только под определенные UA.")
+f_ua.description = translate("Маскировка клиента. Некоторые серверы отдают узлы только под определенные UA.")
 f_ua:value("SubConv/1.0", "SubConv/1.0 (По умолчанию)")
 f_ua:value("sing-box/1.9.3", "sing-box 1.9.3")
 f_ua:value("mihomo/1.18.3", "mihomo 1.18.3 (Clash.Meta)")
@@ -307,14 +311,14 @@ f_ua.default = "SubConv/1.0"
 f_ua.rmempty = true
 
 local f_hwid_opt = s_add:option(Value, "hwid", translate("HWID устройства"))
-f_hwid_opt.description = translate("Уникальный идентификатор. Защищает от блокировки при мультиаккаунтах.")
+f_hwid_opt.description = translate("Уникальный идентификатор устройства. Защищает от блокировки за мультиаккаунт.")
 f_hwid_opt:value(random_hwid, random_hwid .. " (Случайный - По умолчанию)")
 f_hwid_opt:value(sys_hwid, sys_hwid .. " (Ваш роутер)")
 f_hwid_opt.default = random_hwid
 f_hwid_opt.rmempty = true
 
 local f_os = s_add:option(Value, "device_os", translate("OS Устройства"))
-f_os.description = translate("Система, которая будет указана в заголовках запроса.")
+f_os.description = translate("Операционная система, которая будет указана в заголовках запроса.")
 f_os:value(sys_os, sys_os)
 f_os:value("Windows 11", "Windows 11")
 f_os:value("iOS 17.0", "iOS 17.0")
@@ -332,7 +336,7 @@ f_model.default = sys_model
 f_model.rmempty = true
 
 local f_interval = s_add:option(ListValue, "interval", translate("Интервал обновления"))
-f_interval.description = translate("Как часто роутер будет автоматически скачивать свежие узлы (Cron).")
+f_interval.description = translate("Как часто роутер будет автоматически скачивать свежие узлы (через Cron).")
 f_interval:value("0", translate("Отключено"))
 f_interval:value("30", translate("Каждые 30 мин"))
 f_interval:value("60", translate("Каждый 1 час"))
@@ -341,6 +345,7 @@ f_interval:value("720", translate("Каждые 12 часов"))
 f_interval:value("1440", translate("Раз в сутки"))
 f_interval.default = "1440"
 
+-- Скрипт для выстраивания описаний в линию с полями ввода
 local f_js = s_add:option(DummyValue, "_js_tweaks")
 f_js.rawhtml = true
 function f_js.cfgvalue()
@@ -379,6 +384,7 @@ function btn_add.write(self, section)
     if new_id and new_id ~= "" and new_url and new_url ~= "" then
         new_id = string.gsub(new_id, "[^%w_]", "_")
         
+        -- Проверка на дубликат ID
         if uci:get("subconv", new_id) then
             m.message = "Ошибка: Подписка с именем '" .. new_id .. "' уже существует!"
             return
@@ -428,7 +434,7 @@ local hwid_opt = s_list:option(DummyValue, "hwid", translate("HWID"))
 hwid_opt.rawhtml = true
 function hwid_opt.cfgvalue(self, section)
     local val = uci:get("subconv", section, "hwid") or ""
-    return string.format('<div style="font-family: monospace; font-size: 11px; white-space: nowrap;">%s</div>', val)
+    return string.format('<div style="word-break: break-all; font-family: monospace; font-size: 11px; line-height: 1.2; min-width: 100px;">%s</div>', val)
 end
 
 local os_opt = s_list:option(DummyValue, "device_os", translate("OS"))
