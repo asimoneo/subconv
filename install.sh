@@ -1,7 +1,7 @@
 #!/bin/sh
 
 echo "========================================================="
-echo "        Установка Subconv (User-Agent редактируется)     "
+echo "        Установка Subconv                                "
 echo "========================================================="
 echo "Выберите действие:"
 echo " 1) Установить / Обновить плагин"
@@ -369,12 +369,15 @@ s_list.template = "cbi/tblsection"
 
 local en = s_list:option(Flag, "enabled", translate("Вкл"))
 en.rmempty = false
+en.default = "1"
+en.enabled = "1"
+en.disabled = "0"
 
 local url_list = s_list:option(DummyValue, "url", translate("URL"))
 url_list.rawhtml = true
 function url_list.cfgvalue(self, section)
     local val = uci:get("subconv", section, "url") or ""
-    return string.format('<div style="max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="%s">%s</div>', val, val)
+    return string.format('<div style="word-break: break-all; min-width: 200px; font-size: 11px; line-height: 1.2;">%s</div>', val)
 end
 
 local ua_list = s_list:option(Value, "user_agent", translate("User-Agent"))
