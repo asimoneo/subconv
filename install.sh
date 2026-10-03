@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="0.3.10"
+VERSION="0.3.11"
 action="${1}"
 
 echo "========================================================="
@@ -64,7 +64,12 @@ mkdir -p /usr/share/luci/menu.d
 mkdir -p /usr/share/rpcd/acl.d
 
 echo "Загрузка дешифратора..."
-curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt" -o /usr/libexec/happ-decrypt
+COMMIT_SHA=$(curl -sSL --connect-timeout 5 https://api.github.com/repos/asimoneo/subconv/commits/main | grep '"sha"' | head -n 1 | awk -F '"' '{print $4}')
+if [ -n "$COMMIT_SHA" ]; then
+    curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/${COMMIT_SHA}/happ-decrypt" -o /usr/libexec/happ-decrypt
+else
+    curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt" -o /usr/libexec/happ-decrypt
+fi
 chmod +x /usr/libexec/happ-decrypt
 
 cat << 'EOF' > /usr/libexec/subconv-update.sh
@@ -395,7 +400,7 @@ f_interval:value("720", translate("Каждые 12 часов"))
 f_interval:value("1440", translate("Раз в сутки"))
 f_interval.default = "1440"
 
--- Динамическое считывание версии (Через API GitHub)
+-- Динамическое считывание версии (API GitHub)
 local current_ver = "$VERSION"
 local cache_file = "/tmp/subconv_ver_cache"
 local remote_ver = current_ver
