@@ -1,7 +1,7 @@
 #!/bin/sh
 
 echo "========================================================="
-echo "        Установка Subconv (Финальная сборка)             "
+echo "        Установка Subconv (Поддержка happ:// + Скрытие URL)"
 echo "========================================================="
 echo "Выберите действие:"
 echo " 1) Установить / Обновить плагин"
@@ -128,7 +128,7 @@ else
     local maybe_decoded = nixio.bin.b64decode(resp)
     
     if maybe_decoded then
-        if maybe_decoded:match("://") or maybe_decoded:match("^%s*{") or maybe_decoded:match("^%s*%[") or maybe_decoded:match("proxies:") then
+        if maybe_decoded:match("://") or maybe_decoded:match("^%s*{") or maybe_decoded:match("^%s*%[") or maybe_decoded:match("proxies:") or maybe_decoded:match("^happ://") then
             decoded = maybe_decoded
             is_b64 = true
             log("Декодирован Base64")
@@ -154,9 +154,9 @@ else
     else
         local links = {}
         for line in decoded:gmatch("[^\r\n]+") do
-            -- Жесткая очистка строки от невидимых символов и пробелов
             line = line:match("^%s*(.-)%s*$")
-            if line and line:match("://") then 
+            -- Поддержка стандартных URI и схем вида happ://
+            if line and (line:match("://") or line:match("^happ://")) then 
                 table.insert(links, line) 
             end
         end
@@ -166,8 +166,8 @@ else
             if f_out then
                 f_out:write(table.concat(links, "\n") .. "\n")
                 f_out:close()
-                log("УСПЕХ: Найдено " .. #links .. " узлов URI")
-                if is_b64 then save_status("Base64 URI (" .. #links .. ")") else save_status("Текст URI (" .. #links .. ")") end
+                log("УСПЕХ: Найдено " .. #links .. " узлов")
+                if is_b64 then save_status("Base64 (" .. #links .. ")") else save_status("Текст (" .. #links .. ")") end
             else
                 save_status("Ошибка записи")
             end
@@ -345,7 +345,6 @@ f_interval:value("720", translate("Каждые 12 часов"))
 f_interval:value("1440", translate("Раз в сутки"))
 f_interval.default = "1440"
 
--- Скрипт для выстраивания описаний в линию с полями ввода
 local f_js = s_add:option(DummyValue, "_js_tweaks")
 f_js.rawhtml = true
 function f_js.cfgvalue()
@@ -370,7 +369,8 @@ function f_js.cfgvalue()
     ]]
 end
 
-local btn_add = s_add:option(Button, "_add", translate("Добавить подписку"))
+local btn_add = s_add:option(Button, "_add", "")
+btn_add.inputtitle = translate("➕ Добавить подписку")
 btn_add.inputstyle = "add"
 function btn_add.write(self, section)
     local new_id = m:formvalue("cbid.subconv.add.sub_id")
@@ -384,7 +384,6 @@ function btn_add.write(self, section)
     if new_id and new_id ~= "" and new_url and new_url ~= "" then
         new_id = string.gsub(new_id, "[^%w_]", "_")
         
-        -- Проверка на дубликат ID
         if uci:get("subconv", new_id) then
             m.message = "Ошибка: Подписка с именем '" .. new_id .. "' уже существует!"
             return
@@ -404,7 +403,8 @@ function btn_add.write(self, section)
     end
 end
 
-local s_list = m:section(TypedSection, "subscription", translate("Активные подписки"))
+local list_title = translate("Активные подписки") .. [[ <button type="submit" name="update_all" value="1" class="cbi-button cbi-button-apply" style="margin-left: 15px; font-size: 12px; padding: 4px 12px;">🔄 Обновить все</button> <span style="font-weight: normal; font-size: 12px; opacity: 0.7; margin-left: 10px;">(процесс может занять некоторое время)</span>]]
+local s_list = m:section(TypedSection, "subscription", list_title)
 s_list.anonymous = true
 s_list.addremove = false
 s_list.template = "cbi/tblsection"
@@ -415,11 +415,12 @@ en.default = "1"
 en.enabled = "1"
 en.disabled = "0"
 
+-- URL со скрытием (спойлер с размытием и проявлением при наведении)
 local url_list = s_list:option(DummyValue, "url", translate("URL"))
 url_list.rawhtml = true
 function url_list.cfgvalue(self, section)
     local val = uci:get("subconv", section, "url") or ""
-    return string.format('<div style="word-break: break-all; min-width: 200px; font-size: 11px; line-height: 1.2;">%s</div>', val)
+    return string.format('<div style="word-break: break-all; min-width: 200px; font-size: 11px; line-height: 1.2; filter: blur(5px); transition: filter 0.2s;" onmouseover="this.style.filter=\'none\'" onmouseout="this.style.filter=\'blur(5px)\'" title="Наведите мышь для просмотра">%s</div>', val)
 end
 
 local ua_list = s_list:option(Value, "user_agent", translate("User-Agent"))
@@ -487,7 +488,7 @@ function btn_upd_list.write(self, section)
 end
 
 local btn_del_list = s_list:option(Button, "_delete", translate(" "))
-btn_del_list.inputtitle = "🗑️"
+btn_del_list.inputtitle = "🗑️️"
 btn_del_list.inputstyle = "remove"
 function btn_del_list.write(self, section)
     os.execute("rm -f " .. util.shellquote("/www/" .. section .. ".txt"))
@@ -520,6 +521,15 @@ end
 
 function m.on_after_commit(self)
     sys.call("/usr/libexec/subconv-cron.sh")
+end
+
+if http.formvalue("update_all") == "1" then
+    uci:foreach("subconv", "subscription", function(s)
+        uci:set("subconv", s['.name'], "last_type", "Обновление...")
+        sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(s['.name']) .. " >/dev/null 2>&1 &")
+    end)
+    uci:commit("subconv")
+    http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
 return m
