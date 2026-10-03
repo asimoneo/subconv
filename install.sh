@@ -1,7 +1,9 @@
 #!/bin/sh
 
+VERSION="0.3.0"
+
 echo "========================================================="
-echo "        Установка Subconv (Поддержка happ:// + Скрытие URL)"
+echo "        Установка Subconv v$VERSION                      "
 echo "========================================================="
 echo "Выберите действие:"
 echo " 1) Установить / Обновить плагин"
@@ -23,6 +25,7 @@ if [ "$action" = "2" ]; then
 
     rm -f /usr/libexec/subconv-update.sh
     rm -f /usr/libexec/subconv-cron.sh
+    rm -f /usr/libexec/happ-decrypt
     rm -f /usr/lib/lua/luci/controller/subconv.lua
     rm -f /usr/lib/lua/luci/model/cbi/subconv.lua
     rm -f /usr/share/luci/menu.d/subconv.json
@@ -93,6 +96,48 @@ end
 
 local out_path = "/www/" .. sub_id .. ".txt"
 
+if url:match("^happ://crypt") or url:match("^v2raytun://crypt") then
+    log("Обнаружена крипто-ссылка. Запуск локальной дешифровки...")
+    local arch = util.trim(sys.exec("uname -m"))
+    local bin_path = "/usr/libexec/happ-decrypt"
+    
+    if not nixio.fs.access(bin_path) then
+        log("Скачивание нативного дешифратора amurcanov для архитектуры: " .. arch)
+        local dl_cmd = ""
+        if arch:match("aarch64") or arch:match("armv8") then
+            dl_cmd = "curl -sL https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/android-arm64-v8a -o " .. bin_path
+        elseif arch:match("x86_64") then
+            dl_cmd = "curl -sL https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/linux-x64_x86 -o " .. bin_path
+        elseif arch:match("arm") then
+            dl_cmd = "curl -sL https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/android-armeabi-v7a -o " .. bin_path
+        else
+            log("ОШИБКА: Архитектура " .. arch .. " не поддерживается бинарниками.")
+            save_status("Ошибка архитектуры")
+            os.exit(1)
+        end
+        os.execute(dl_cmd)
+        os.execute("chmod +x " .. bin_path)
+    end
+    
+    local handle = io.popen(bin_path .. " " .. util.shellquote(url) .. " 2>&1")
+    local result = handle:read("*all")
+    handle:close()
+    
+    local decrypted = result:match("Result\r?\n(https?://%S+)")
+    if not decrypted then
+        decrypted = result:match("Result\r?\n(%S+)")
+    end
+    
+    if decrypted and decrypted:match("^http") then
+        log("Успешно расшифровано! Истинный URL: " .. decrypted:sub(1, 40) .. "...")
+        url = decrypted
+    else
+        log("Сбой дешифровки (проверьте совместимость libc): " .. tostring(result):sub(1, 150))
+        save_status("Сбой дешифровки")
+        os.exit(1)
+    end
+end
+
 log("Запрос: " .. url)
 log("Заголовки: UA=" .. ua .. " | HWID=" .. hwid .. " | OS=" .. dev_os)
 
@@ -155,7 +200,6 @@ else
         local links = {}
         for line in decoded:gmatch("[^\r\n]+") do
             line = line:match("^%s*(.-)%s*$")
-            -- Поддержка стандартных URI и схем вида happ://
             if line and (line:match("://") or line:match("^happ://")) then 
                 table.insert(links, line) 
             end
@@ -166,7 +210,7 @@ else
             if f_out then
                 f_out:write(table.concat(links, "\n") .. "\n")
                 f_out:close()
-                log("УСПЕХ: Найдено " .. #links .. " узлов")
+                log("УСПЕХ: Найдено " .. #links .. " узлов URI")
                 if is_b64 then save_status("Base64 (" .. #links .. ")") else save_status("Текст (" .. #links .. ")") end
             else
                 save_status("Ошибка записи")
@@ -247,8 +291,9 @@ local sys = require "luci.sys"
 local http = require "luci.http"
 local dsp = require "luci.dispatcher"
 local util = require "luci.util"
+local nixio = require "nixio"
 
-local m = Map("subconv", translate("Subconv"), translate("Парсинг подписок и конвертация в списки для HomeProxy."))
+local m = Map("subconv", "Subconv", translate("Парсинг подписок и конвертация в списки для HomeProxy."))
 
 local sys_os = "OpenWrt"
 local f_rel = io.open("/etc/openwrt_release", "r")
@@ -296,7 +341,7 @@ f_id.description = translate("Только латиница без пробел�
 f_id.rmempty = true
 
 local f_url = s_add:option(Value, "url", translate("URL подписки"))
-f_url.description = translate("Прямая ссылка от провайдера (поддерживаются форматы URI, YAML и JSON).")
+f_url.description = translate("Прямая ссылка от провайдера (поддерживаются форматы URI, YAML, JSON, happ://crypt5).")
 f_url.rmempty = true
 
 local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
@@ -345,12 +390,24 @@ f_interval:value("720", translate("Каждые 12 часов"))
 f_interval:value("1440", translate("Раз в сутки"))
 f_interval.default = "1440"
 
+local f_decrypt = s_add:option(DummyValue, "_decrypt", translate("Дешифратор happ://"))
+f_decrypt.description = translate("Нативный модуль для расшифровки протокола crypt5.")
+f_decrypt.rawhtml = true
+function f_decrypt.cfgvalue()
+    local status = "<span style='color:#ff9800;'>Ожидает загрузки (Latest)</span>"
+    if nixio.fs.access("/usr/libexec/happ-decrypt") then
+        status = "<span style='color:#4caf50;'>Установлен (Latest)</span>"
+    end
+    return string.format('<b>%s</b> | <a href="https://github.com/amurcanov/happ-decrypt-universal" target="_blank" style="text-decoration:underline;">amurcanov/happ-decrypt-universal</a>', status)
+end
+
 local f_js = s_add:option(DummyValue, "_js_tweaks")
 f_js.rawhtml = true
 function f_js.cfgvalue()
     return [[
         <script>
             setTimeout(function() {
+                // Выстраиваем описания в строку
                 document.querySelectorAll('#cbi-subconv-add .cbi-value').forEach(function(el) {
                     var field = el.querySelector('.cbi-value-field');
                     var desc = el.querySelector('.cbi-value-description');
@@ -364,6 +421,12 @@ function f_js.cfgvalue()
                         desc.style.fontSize = '12px';
                     }
                 });
+                
+                // Подмена главного заголовка на ссылку с версией
+                var title = document.querySelector('h2');
+                if(title && title.innerText.includes('Subconv')) {
+                    title.innerHTML = '<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;">v0.3.0</span>';
+                }
             }, 100);
         </script>
     ]]
@@ -415,12 +478,16 @@ en.default = "1"
 en.enabled = "1"
 en.disabled = "0"
 
--- URL со скрытием (спойлер с размытием и проявлением при наведении)
 local url_list = s_list:option(DummyValue, "url", translate("URL"))
 url_list.rawhtml = true
 function url_list.cfgvalue(self, section)
     local val = uci:get("subconv", section, "url") or ""
-    return string.format('<div style="word-break: break-all; min-width: 200px; font-size: 11px; line-height: 1.2; filter: blur(5px); transition: filter 0.2s;" onmouseover="this.style.filter=\'none\'" onmouseout="this.style.filter=\'blur(5px)\'" title="Наведите мышь для просмотра">%s</div>', val)
+    local esc_val = val:gsub('"', '&quot;')
+    local visible_len = math.floor(#val / 2)
+    if visible_len > 35 then visible_len = 35 end
+    local hidden_val = string.sub(esc_val, 1, visible_len) .. "••••••••"
+    
+    return string.format('<div style="word-break: break-all; min-width: 200px; font-size: 11px; line-height: 1.2; cursor: pointer;" onmouseover="this.innerText=this.getAttribute(\'data-url\')" onmouseout="this.innerText=\'%s\'" data-url="%s">%s</div>', hidden_val, esc_val, hidden_val)
 end
 
 local ua_list = s_list:option(Value, "user_agent", translate("User-Agent"))
@@ -488,7 +555,7 @@ function btn_upd_list.write(self, section)
 end
 
 local btn_del_list = s_list:option(Button, "_delete", translate(" "))
-btn_del_list.inputtitle = "🗑️️"
+btn_del_list.inputtitle = "🗑️"
 btn_del_list.inputstyle = "remove"
 function btn_del_list.write(self, section)
     os.execute("rm -f " .. util.shellquote("/www/" .. section .. ".txt"))
