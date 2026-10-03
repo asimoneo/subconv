@@ -18,7 +18,7 @@ func main() {
 	originalInput := os.Args[1]
 	input := strings.TrimSpace(originalInput)
 
-	// 1. Убираем префиксы
+	// 1. Убираем префиксы протоколов
 	prefixes := []string{"happ://crypt5/", "happ://crypt4/", "happ://crypt3/", "v2raytun://crypt/"}
 	for _, p := range prefixes {
 		if strings.HasPrefix(input, p) {
@@ -27,39 +27,30 @@ func main() {
 		}
 	}
 
-	// 2. Отсекаем параметры запроса (мусор после ?, & или #)
+	// 2. Декодируем URL (используем PathUnescape, чтобы не ломать символ +)
+	if unescaped, err := url.PathUnescape(input); err == nil {
+		input = unescaped
+	}
+
+	// 3. Строго отсекаем любые параметры и алиасы
 	if idx := strings.IndexAny(input, "?&#"); idx != -1 {
 		input = input[:idx]
 	}
 
-	// 3. Декодируем URL (%2B -> +, %3D -> =)
-	if unescaped, err := url.QueryUnescape(input); err == nil {
-		input = unescaped
-	}
-
-	// 4. Нормализуем алфавит
-	input = strings.ReplaceAll(input, " ", "+")
+	// 4. Унифицируем алфавит Base64
 	input = strings.ReplaceAll(input, "-", "+")
 	input = strings.ReplaceAll(input, "_", "/")
 
-	// 5. Жесткая очистка: собираем только валидные символы и СТОПАЕМСЯ на первом =
+	// 5. Оставляем ТОЛЬКО чистый Base64 (без учета паддинга = и мусора)
 	var clean strings.Builder
 	for _, r := range input {
-		if r == '=' {
-			break // Дальше идет паддинг или мусор, останавливаемся
-		}
 		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '+' || r == '/' {
 			clean.WriteRune(r)
 		}
 	}
-	input = clean.String()
 
-	// 6. Идеально восстанавливаем паддинг
-	if pad := len(input) % 4; pad != 0 {
-		input += strings.Repeat("=", 4-pad)
-	}
-
-	data, err := base64.StdEncoding.DecodeString(input)
+	// 6. Декодируем в "сыром" формате (Raw), которому не нужны знаки =
+	data, err := base64.RawStdEncoding.DecodeString(clean.String())
 	if err != nil {
 		fmt.Printf("Base64 Error: %v\n", err)
 		fmt.Println("Result\n" + originalInput)
@@ -92,9 +83,9 @@ func main() {
 		return
 	}
 
-	res := string(decrypted)
-	if strings.Contains(res, "http") {
-		fmt.Printf("Result\n%s\n", strings.TrimSpace(res))
+	res := strings.TrimSpace(string(decrypted))
+	if strings.HasPrefix(res, "http") || strings.Contains(res, "://") {
+		fmt.Printf("Result\n%s\n", res)
 	} else {
 		fmt.Printf("Invalid protocol after decrypt: %s\n", res[:10])
 		fmt.Println("Result\n" + originalInput)
