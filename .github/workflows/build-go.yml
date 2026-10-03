@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -20,6 +22,7 @@ jobs:
 
       - name: Init Go Module
         run: |
+          rm -f go.mod go.sum
           go mod init subconv
           go get golang.org/x/crypto/chacha20poly1305
           go mod tidy
