@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="0.3.7"
+VERSION="0.3.8"
 action="${1}"
 
 echo "========================================================="
@@ -37,6 +37,7 @@ if [ "$action" = "2" ]; then
     rm -f /usr/share/rpcd/acl.d/subconv.json
     rm -f /etc/config/subconv
     rm -f /www/subconv_debug.txt
+    rm -f /tmp/subconv_ver_cache
     
     if [ -f /etc/crontabs/root ]; then
         sed -i '/subconv-update.sh/d' /etc/crontabs/root
@@ -55,10 +56,10 @@ if ! command -v curl >/dev/null 2>&1; then
     opkg install curl
 fi
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "Установка python3-light..."
+if ! python3 -c "import cryptography" >/dev/null 2>&1; then
+    echo "Установка Python и крипто-библиотек..."
     opkg update
-    opkg install python3-light
+    opkg install python3-light python3-cryptography python3-base64 python3-urllib
 fi
 
 mkdir -p /usr/libexec
@@ -68,7 +69,7 @@ mkdir -p /usr/share/luci/menu.d
 mkdir -p /usr/share/rpcd/acl.d
 
 cat << 'EOF' > /usr/libexec/happ-decrypt.py
-#!/usr/bin/env python3
+#!/usr/bin/python3
 import sys, base64
 
 def decrypt_happ(url):
@@ -82,8 +83,23 @@ def decrypt_happ(url):
             pass
 
         data = base64.b64decode(raw + "===")
-        print("Result\n" + url)
-        return
+        
+        nonce = data[:12]
+        ciphertext = data[12:-16]
+        tag = data[-16:]
+        
+        # Ключ протокола
+        key = bytes.fromhex("e10adc3949ba59abbe56e057f20f883e" * 2)[:32]
+        
+        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+        chacha = ChaCha20Poly1305(key)
+        decrypted = chacha.decrypt(nonce, ciphertext + tag, None)
+        
+        result = decrypted.decode('utf-8')
+        if "http" in result:
+            print(f"Result\n{result.strip()}")
+            return
+            
     except Exception as e:
         print(f"Decrypt Error: {str(e)}")
         
@@ -289,34 +305,6 @@ config_foreach add_cron subscription
 EOF
 chmod +x /usr/libexec/subconv-cron.sh
 
-cat << 'EOF' > /usr/share/luci/menu.d/subconv.json
-{
-    "admin/services/subconv": {
-        "title": "Subconv",
-        "order": 90,
-        "action": { "type": "cbi", "path": "subconv" },
-        "depends": { "acl": [ "luci-app-subconv" ] }
-    }
-}
-EOF
-
-cat << 'EOF' > /usr/share/rpcd/acl.d/subconv.json
-{
-    "luci-app-subconv": {
-        "description": "Grant access to Subconv",
-        "read": { "uci": [ "subconv" ] },
-        "write": { "uci": [ "subconv" ] }
-    }
-}
-EOF
-
-cat << 'EOF' > /usr/lib/lua/luci/controller/subconv.lua
-module("luci.controller.subconv", package.seeall)
-function index()
-    entry({"admin", "services", "subconv"}, cbi("subconv"), _("Subconv"), 90).dependent = true
-end
-EOF
-
 cat << EOF > /usr/lib/lua/luci/model/cbi/subconv.lua
 local uci = require "luci.model.uci".cursor()
 local sys = require "luci.sys"
@@ -422,29 +410,43 @@ f_interval:value("720", translate("Каждые 12 часов"))
 f_interval:value("1440", translate("Раз в сутки"))
 f_interval.default = "1440"
 
--- Динамическое считывание версии
+-- Динамическое считывание версии (Вариант А - через API GitHub по коммиту)
 local current_ver = "$VERSION"
 local cache_file = "/tmp/subconv_ver_cache"
 local remote_ver = current_ver
+local commit_sha = "main"
 local ts = 0
 local f = io.open(cache_file, "r")
 if f then
     local content = f:read("*a")
     f:close()
-    local pts, pver = content:match("^(%d+)|(.*)$")
-    if pts then ts = tonumber(pts); remote_ver = pver:gsub("%s+", "") end
+    local pts, pver, psha = content:match("^(%d+)|(.-)|(.*)$")
+    if pts then 
+        ts = tonumber(pts)
+        remote_ver = pver:gsub("%s+", "") 
+        if psha and psha ~= "" then commit_sha = psha:gsub("%s+", "") end
+    end
 end
 
 if os.time() - ts > 10 then
-    local h = io.popen("curl -sL --connect-timeout 3 --max-time 5 'https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/install.sh' | grep '^VERSION=' | head -n 1")
-    if h then
-        local res = h:read("*a")
-        h:close()
-        local fetched = res:match('VERSION="(.-)"')
-        if fetched then
-            remote_ver = fetched:gsub("%s+", "")
-            local fw = io.open(cache_file, "w")
-            if fw then fw:write(os.time() .. "|" .. remote_ver); fw:close() end
+    local h_sha = io.popen("curl -sL --connect-timeout 3 --max-time 5 https://api.github.com/repos/asimoneo/subconv/commits/main")
+    if h_sha then
+        local res_sha = h_sha:read("*a")
+        h_sha:close()
+        local fetched_sha = res_sha:match('"sha"%s*:%s*"([^"]+)"')
+        if fetched_sha then
+            commit_sha = fetched_sha
+            local h = io.popen("curl -sL --connect-timeout 3 --max-time 5 https://raw.githubusercontent.com/asimoneo/subconv/" .. commit_sha .. "/install.sh | grep '^VERSION=' | head -n 1")
+            if h then
+                local res = h:read("*a")
+                h:close()
+                local fetched = res:match('VERSION="(.-)"')
+                if fetched then
+                    remote_ver = fetched:gsub("%s+", "")
+                    local fw = io.open(cache_file, "w")
+                    if fw then fw:write(os.time() .. "|" .. remote_ver .. "|" .. commit_sha); fw:close() end
+                end
+            end
         end
     end
 end
@@ -453,7 +455,7 @@ local update_html = ""
 if remote_ver == current_ver then
     update_html = '<span style="color:#4caf50; font-size:12px; margin-left:10px;">✅ актуальная</span>'
 else
-    update_html = string.format('<span style="color:#ff9800; font-size:12px; margin-left:10px;">⚠️ старая версия, актуальная - %s</span> <button type="submit" name="subconv_self_update" value="1" class="cbi-button cbi-button-apply" style="margin-left:5px; padding:2px 8px; font-size:11px;">Обновить</button>', remote_ver)
+    update_html = string.format('<span style="color:#ff9800; font-size:12px; margin-left:10px;">⚠ старая версия, актуальная - %s</span> <button type="submit" name="subconv_self_update" value="1" class="cbi-button cbi-button-apply" style="margin-left:5px; padding:2px 8px; font-size:11px;">Обновить</button>', remote_ver)
 end
 
 local title_inj = string.format([[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;">v%s</span> %s]], current_ver, update_html)
@@ -652,7 +654,16 @@ if http.formvalue("update_all") == "1" then
 end
 
 if http.formvalue("subconv_self_update") == "1" then
-    sys.call("curl -sSL https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/install.sh | sh -s 1 >/dev/null 2>&1 &")
+    local cache_file = "/tmp/subconv_ver_cache"
+    local f = io.open(cache_file, "r")
+    local sha = "main"
+    if f then
+        local content = f:read("*a")
+        f:close()
+        local _, _, c_sha = content:match("^(%d+)|(.-)|(.*)$")
+        if c_sha and c_sha ~= "" then sha = c_sha:gsub("%s+", "") end
+    end
+    sys.call("curl -sSL https://raw.githubusercontent.com/asimoneo/subconv/" .. sha .. "/install.sh | sh -s 1 >/dev/null 2>&1 &")
     http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
