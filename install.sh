@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="0.3.8"
+VERSION="0.3.9"
 action="${1}"
 
 echo "========================================================="
@@ -56,10 +56,12 @@ if ! command -v curl >/dev/null 2>&1; then
     opkg install curl
 fi
 
-if ! python3 -c "import cryptography" >/dev/null 2>&1; then
-    echo "Установка Python и крипто-библиотек..."
+if ! command -v python3 >/dev/null 2>&1 || ! python3 -c "import cryptography" >/dev/null 2>&1; then
+    echo "Установка Python и крипто-библиотек (это может занять минуту)..."
     opkg update
-    opkg install python3-light python3-cryptography python3-base64 python3-urllib
+    opkg install python3-light
+    opkg install python3-cryptography
+    opkg install python3-urllib
 fi
 
 mkdir -p /usr/libexec
@@ -168,7 +170,8 @@ if url:match("^happ://crypt") or url:match("^v2raytun://crypt") then
         os.exit(1)
     end
     
-    local handle = io.popen(bin_path .. " " .. util.shellquote(url) .. " 2>&1")
+    -- Явный вызов через python3 чтобы обойти проблемы с оболочкой
+    local handle = io.popen("python3 " .. bin_path .. " " .. util.shellquote(url) .. " 2>&1")
     local result = handle and handle:read("*all") or ""
     if handle then handle:close() end
     
@@ -305,6 +308,34 @@ config_foreach add_cron subscription
 EOF
 chmod +x /usr/libexec/subconv-cron.sh
 
+cat << 'EOF' > /usr/share/luci/menu.d/subconv.json
+{
+    "admin/services/subconv": {
+        "title": "Subconv",
+        "order": 90,
+        "action": { "type": "cbi", "path": "subconv" },
+        "depends": { "acl": [ "luci-app-subconv" ] }
+    }
+}
+EOF
+
+cat << 'EOF' > /usr/share/rpcd/acl.d/subconv.json
+{
+    "luci-app-subconv": {
+        "description": "Grant access to Subconv",
+        "read": { "uci": [ "subconv" ] },
+        "write": { "uci": [ "subconv" ] }
+    }
+}
+EOF
+
+cat << 'EOF' > /usr/lib/lua/luci/controller/subconv.lua
+module("luci.controller.subconv", package.seeall)
+function index()
+    entry({"admin", "services", "subconv"}, cbi("subconv"), _("Subconv"), 90).dependent = true
+end
+EOF
+
 cat << EOF > /usr/lib/lua/luci/model/cbi/subconv.lua
 local uci = require "luci.model.uci".cursor()
 local sys = require "luci.sys"
@@ -410,7 +441,7 @@ f_interval:value("720", translate("Каждые 12 часов"))
 f_interval:value("1440", translate("Раз в сутки"))
 f_interval.default = "1440"
 
--- Динамическое считывание версии (Вариант А - через API GitHub по коммиту)
+-- Динамическое считывание версии (Через API GitHub)
 local current_ver = "$VERSION"
 local cache_file = "/tmp/subconv_ver_cache"
 local remote_ver = current_ver
@@ -606,7 +637,7 @@ function btn_upd_list.write(self, section)
 end
 
 local btn_del_list = s_list:option(Button, "_delete", translate(" "))
-btn_del_list.inputtitle = "🗑️"
+btn_del_list.inputtitle = "🗑️️"
 btn_del_list.inputstyle = "remove"
 function btn_del_list.write(self, section)
     os.execute("rm -f " .. util.shellquote("/www/" .. section .. ".txt"))
