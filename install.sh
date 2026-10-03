@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="0.3.9"
+VERSION="0.3.10"
 action="${1}"
 
 echo "========================================================="
@@ -30,6 +30,7 @@ if [ "$action" = "2" ]; then
 
     rm -f /usr/libexec/subconv-update.sh
     rm -f /usr/libexec/subconv-cron.sh
+    rm -f /usr/libexec/happ-decrypt
     rm -f /usr/libexec/happ-decrypt.py
     rm -f /usr/lib/lua/luci/controller/subconv.lua
     rm -f /usr/lib/lua/luci/model/cbi/subconv.lua
@@ -52,16 +53,8 @@ if [ "$action" = "2" ]; then
 fi
 
 if ! command -v curl >/dev/null 2>&1; then
-    opkg update
-    opkg install curl
-fi
-
-if ! command -v python3 >/dev/null 2>&1 || ! python3 -c "import cryptography" >/dev/null 2>&1; then
-    echo "Установка Python и крипто-библиотек (это может занять минуту)..."
-    opkg update
-    opkg install python3-light
-    opkg install python3-cryptography
-    opkg install python3-urllib
+    /bin/opkg update
+    /bin/opkg install curl
 fi
 
 mkdir -p /usr/libexec
@@ -70,47 +63,9 @@ mkdir -p /usr/lib/lua/luci/controller
 mkdir -p /usr/share/luci/menu.d
 mkdir -p /usr/share/rpcd/acl.d
 
-cat << 'EOF' > /usr/libexec/happ-decrypt.py
-#!/usr/bin/python3
-import sys, base64
-
-def decrypt_happ(url):
-    try:
-        raw = url.replace("happ://crypt5/", "").replace("happ://crypt4/", "").replace("happ://crypt3/", "").replace("v2raytun://crypt/", "")
-        
-        try:
-            import urllib.parse
-            raw = urllib.parse.unquote(raw)
-        except ImportError:
-            pass
-
-        data = base64.b64decode(raw + "===")
-        
-        nonce = data[:12]
-        ciphertext = data[12:-16]
-        tag = data[-16:]
-        
-        # Ключ протокола
-        key = bytes.fromhex("e10adc3949ba59abbe56e057f20f883e" * 2)[:32]
-        
-        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-        chacha = ChaCha20Poly1305(key)
-        decrypted = chacha.decrypt(nonce, ciphertext + tag, None)
-        
-        result = decrypted.decode('utf-8')
-        if "http" in result:
-            print(f"Result\n{result.strip()}")
-            return
-            
-    except Exception as e:
-        print(f"Decrypt Error: {str(e)}")
-        
-    print("Result\n" + url)
-
-if len(sys.argv) > 1:
-    decrypt_happ(sys.argv[1])
-EOF
-chmod +x /usr/libexec/happ-decrypt.py
+echo "Загрузка дешифратора..."
+curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt" -o /usr/libexec/happ-decrypt
+chmod +x /usr/libexec/happ-decrypt
 
 cat << 'EOF' > /usr/libexec/subconv-update.sh
 #!/usr/bin/lua
@@ -161,17 +116,16 @@ end
 local out_path = "/www/" .. sub_id .. ".txt"
 
 if url:match("^happ://crypt") or url:match("^v2raytun://crypt") then
-    log("Обнаружена крипто-ссылка. Запуск локальной дешифровки (Python)...")
-    local bin_path = "/usr/libexec/happ-decrypt.py"
+    log("Обнаружена крипто-ссылка. Запуск локальной дешифровки (Бинарник)...")
+    local bin_path = "/usr/libexec/happ-decrypt"
     
     if not nixio.fs.access(bin_path) then
-        log("ОШИБКА: Скрипт дешифратора не найден.")
+        log("ОШИБКА: Бинарник дешифратора не найден.")
         save_status("Нет дешифратора")
         os.exit(1)
     end
     
-    -- Явный вызов через python3 чтобы обойти проблемы с оболочкой
-    local handle = io.popen("python3 " .. bin_path .. " " .. util.shellquote(url) .. " 2>&1")
+    local handle = io.popen(bin_path .. " " .. util.shellquote(url) .. " 2>&1")
     local result = handle and handle:read("*all") or ""
     if handle then handle:close() end
     
@@ -637,7 +591,7 @@ function btn_upd_list.write(self, section)
 end
 
 local btn_del_list = s_list:option(Button, "_delete", translate(" "))
-btn_del_list.inputtitle = "🗑️️"
+btn_del_list.inputtitle = "🗑️"
 btn_del_list.inputstyle = "remove"
 function btn_del_list.write(self, section)
     os.execute("rm -f " .. util.shellquote("/www/" .. section .. ".txt"))
