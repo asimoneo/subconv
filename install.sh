@@ -429,7 +429,7 @@ f_interval:value("1440", translate("Раз в сутки"))
 f_interval.default = "1440"
 
 -- Логика проверки самообновления (кеширование на 10 сек)
-local current_ver = "0.3.5"
+local current_ver = $VERSION
 local cache_file = "/tmp/subconv_ver_cache"
 local remote_ver = current_ver
 local ts = 0
