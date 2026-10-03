@@ -32,6 +32,13 @@ if [ "$action" = "2" ]; then
     exit 0
 fi
 
+echo "0. Проверка и установка зависимостей..."
+if ! command -v curl >/dev/null 2>&1; then
+    echo "Установка curl (требуется для скачивания подписок)..."
+    opkg update
+    opkg install curl
+fi
+
 echo "1. Создание системных директорий..."
 mkdir -p /usr/libexec
 mkdir -p /usr/lib/lua/luci/model/cbi
@@ -39,10 +46,12 @@ mkdir -p /usr/lib/lua/luci/controller
 mkdir -p /usr/share/luci/menu.d
 mkdir -p /usr/share/rpcd/acl.d
 
-echo "2. Создание скрипта обновления..."
+echo "2. Создание безопасного скрипта обновления..."
 cat << 'EOF' > /usr/libexec/subconv-update.sh
 #!/usr/bin/lua
 local uci = require "luci.model.uci".cursor()
+local util = require "luci.util"
+local nixio = require "nixio"
 
 local sub_id = arg[1]
 local debug_file = "/www/subconv_debug.txt"
@@ -50,13 +59,12 @@ local f_dbg = io.open(debug_file, "w")
 
 local function log(msg)
     if f_dbg then
-        f_dbg:write(msg .. "\n")
+        f_dbg:write(os.date("%Y-%m-%d %H:%M:%S") .. " [" .. (sub_id or "NONE") .. "] " .. msg .. "\n")
         f_dbg:flush()
     end
 end
 
-log("=== СТАРТ ОБНОВЛЕНИЯ (Lua) ===")
-
+log("=== СТАРТ ОБНОВЛЕНИЯ ===")
 if not sub_id then
     log("Ошибка: не указан ID подписки")
     if f_dbg then f_dbg:close() end
@@ -65,103 +73,82 @@ end
 
 uci:load("subconv")
 local url = uci:get("subconv", sub_id, "url")
-local ua = uci:get("subconv", sub_id, "user_agent") or "sing-box"
-local hwid = uci:get("subconv", sub_id, "hwid")
+local ua = uci:get("subconv", sub_id, "user_agent") or "Happ/SC"
+local hwid = uci:get("subconv", sub_id, "hwid") or "openwrt-router-default"
 local dev_os = uci:get("subconv", sub_id, "device_os") or "OpenWrt"
 local dev_model = uci:get("subconv", sub_id, "device_model") or "OpenWrt Router"
+local format = uci:get("subconv", sub_id, "format") or "uri"
 
 if not url or url == "" then
-    log("Ошибка: URL не задан для " .. sub_id)
+    log("Ошибка: URL не задан")
     if f_dbg then f_dbg:close() end
     os.exit(1)
 end
 
-if not hwid or hwid == "" then
-    local f = io.open("/etc/machine-id", "r")
-    if f then
-        hwid = f:read("*all"):gsub("%s+", "")
-        f:close()
-    end
-    if not hwid or hwid == "" then
-        hwid = "openwrt-router-default"
-    end
-end
+local out_path = "/www/" .. sub_id .. ".txt"
 
-log("URL: " .. url)
-log("HWID: " .. hwid)
-
-local cmd = string.format("curl -k -L -s -A '%s' -H 'X-HWID: %s' -H 'X-DEVICE-OS: %s' -H 'X-DEVICE-MODEL: %s' '%s'",
-    ua, hwid, dev_os, dev_model, url)
+-- Безопасная передача аргументов с таймаутом
+local cmd = string.format("curl -k -L -s --connect-timeout 10 --max-time 30 -A %s -H %s -H %s -H %s %s",
+    util.shellquote(ua),
+    util.shellquote("X-HWID: " .. hwid),
+    util.shellquote("X-DEVICE-OS: " .. dev_os),
+    util.shellquote("X-DEVICE-MODEL: " .. dev_model),
+    util.shellquote(url)
+)
 
 local handle = io.popen(cmd)
 local resp = handle:read("*all")
 handle:close()
 
-log("Получено байт: " .. #resp)
-
-if #resp == 0 then
-    log("Ошибка: пустой ответ от сервера")
+if not resp or #resp == 0 then
+    log("Ошибка: пустой ответ сервера или превышен таймаут")
     if f_dbg then f_dbg:close() end
     os.exit(1)
 end
 
-local function decodeBase64(data)
-    local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-    data = string.gsub(data, '[^'..b..'=]', '')
-    return (data:gsub('.', function(x)
-        if (x == '=') then return '' end
-        local r,f='',(b:find(x)-1)
-        for i=6,1,-1 do r=r..(f%2^i-f%2^(i-1)>0 and '1' or '0') end
-        return r
-    end):gsub('%d%d%d?%d?%d?%d?%d?%d?', function(x)
-        if (#x ~= 8) then return '' end
-        local c=0
-        for i=1,8 do c=c+(x:sub(i,i)=='1' and 2^(8-i) or 0) end
-        return string.char(c)
-    end))
-end
-
-local decoded = resp
-local maybe_decoded = decodeBase64(resp)
-if maybe_decoded and maybe_decoded:match("://") then
-    decoded = maybe_decoded
-    log("Base64 успешно декодирован")
-else
-    log("Используем ответ как открытый текст")
-end
-
-local links = {}
-for line in decoded:gmatch("[^\r\n]+") do
-    if line:match("://") then
-        table.insert(links, line)
-    end
-end
-
-log("Найдено узлов прокси: " .. #links)
-
-if #links > 0 then
-    local out_path = "/www/" .. sub_id .. ".txt"
+if format == "raw" then
+    log("Режим RAW: сохраняем файл без изменений")
     local f_out = io.open(out_path, "w")
     if f_out then
-        f_out:write(table.concat(links, "\n") .. "\n")
+        f_out:write(resp)
         f_out:close()
-        log("УСПЕХ: записано в " .. out_path)
-        if f_dbg then f_dbg:close() end
-        os.exit(0)
-    else
-        log("Ошибка записи в файл " .. out_path)
-        if f_dbg then f_dbg:close() end
-        os.exit(1)
+        log("УСПЕХ: сохранено в " .. out_path)
     end
 else
-    log("ОШИБКА: не найдено ни одного узла")
-    if f_dbg then f_dbg:close() end
-    os.exit(1)
+    local decoded = resp
+    local maybe_decoded = nixio.bin.b64decode(resp)
+    if maybe_decoded and maybe_decoded:match("://") then
+        decoded = maybe_decoded
+        log("Base64 успешно декодирован через nixio")
+    else
+        log("Открытый текст (или не удалось декодировать Base64)")
+    end
+
+    local links = {}
+    for line in decoded:gmatch("[^\r\n]+") do
+        if line:match("://") then
+            table.insert(links, line)
+        end
+    end
+
+    if #links > 0 then
+        local f_out = io.open(out_path, "w")
+        if f_out then
+            f_out:write(table.concat(links, "\n") .. "\n")
+            f_out:close()
+            log("УСПЕХ: Найдено узлов - " .. #links .. ". Сохранено в " .. out_path)
+        else
+            log("Ошибка записи в файл " .. out_path)
+        end
+    else
+        log("ОШИБКА: не найдено ни одного узла URI")
+    end
 end
+if f_dbg then f_dbg:close() end
 EOF
 chmod +x /usr/libexec/subconv-update.sh
 
-echo "3. Создание скрипта Cron (/usr/libexec/subconv-cron.sh)..."
+echo "3. Создание скрипта Cron (с правильными интервалами)..."
 cat << 'EOF' > /usr/libexec/subconv-cron.sh
 #!/bin/sh
 . /lib/functions.sh
@@ -175,17 +162,15 @@ add_cron() {
     config_get interval "$cfg" interval 1440
     
     if [ "$enabled" -eq 1 ] && [ "$interval" -gt 0 ]; then
-        local m=$((interval % 60))
-        local h=$((interval / 60))
-        local cron_expr
-        if [ "$h" -eq 0 ]; then
-            cron_expr="*/$interval * * * *"
-        elif [ "$h" -lt 24 ]; then
-            cron_expr="$m */$h * * *"
-        else
-            local d=$((h / 24))
-            cron_expr="$m 0 */$d * *"
-        fi
+        local cron_expr=""
+        case "$interval" in
+            30) cron_expr="*/30 * * * *" ;;
+            60) cron_expr="0 * * * *" ;;
+            360) cron_expr="0 */6 * * *" ;;
+            720) cron_expr="0 */12 * * *" ;;
+            1440) cron_expr="0 4 * * *" ;;
+            *) cron_expr="0 4 * * *" ;;
+        esac
         echo "$cron_expr /usr/libexec/subconv-update.sh $cfg >/dev/null 2>&1" >> /etc/crontabs/root
     fi
 }
@@ -241,8 +226,9 @@ local uci = require "luci.model.uci".cursor()
 local sys = require "luci.sys"
 local http = require "luci.http"
 local dsp = require "luci.dispatcher"
+local util = require "luci.util"
 
-local m = Map("subconv", translate("Subconv"), translate("Парсинг YAML-подписок и конвертация в списки для HomeProxy."))
+local m = Map("subconv", translate("Subconv"), translate("Парсинг подписок и конвертация в списки для HomeProxy."))
 
 local sys_os = "OpenWrt"
 local f_rel = io.open("/etc/openwrt_release", "r")
@@ -279,16 +265,30 @@ s_add.addremove = false
 s_add.anonymous = true
 
 local f_id = s_add:option(Value, "sub_id", translate("Имя подписки (ID)"))
-f_id.description = translate("Уникальное имя. Имя файла будет совпадать ({name}.txt).")
+f_id.description = translate("Только латиница. Имя файла будет совпадать ({ID}.txt).")
 f_id.rmempty = true
 
 local f_url = s_add:option(Value, "url", translate("URL подписки"))
 f_url.rmempty = true
 
 local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
-f_ua.default = "sing-box"
+f_ua.default = "Happ/SC"
 f_ua.description = translate("влияет на выдачу, например Happ / sing-box / и т.д.")
 f_ua.rmempty = true
+
+local f_format = s_add:option(ListValue, "format", translate("Формат"))
+f_format:value("uri", "URI (vless://...)")
+f_format:value("raw", "Raw (Оставить как есть YAML/JSON)")
+f_format.default = "uri"
+
+local f_interval = s_add:option(ListValue, "interval", translate("Обновление"))
+f_interval:value("0", translate("Отключено"))
+f_interval:value("30", translate("Каждые 30 мин"))
+f_interval:value("60", translate("Каждый 1 час"))
+f_interval:value("360", translate("Каждые 6 часов"))
+f_interval:value("720", translate("Каждые 12 часов"))
+f_interval:value("1440", translate("Раз в сутки"))
+f_interval.default = "1440"
 
 local f_hwid_opt = s_add:option(Value, "hwid", translate("HWID устройства"))
 f_hwid_opt.default = sys_hwid
@@ -307,13 +307,16 @@ btn_add.inputstyle = "add"
 function btn_add.write(self, section)
     local new_id = m:formvalue("cbid.subconv.add.sub_id")
     local new_url = m:formvalue("cbid.subconv.add.url")
-    local new_ua = m:formvalue("cbid.subconv.add.user_agent") or "sing-box"
+    local new_ua = m:formvalue("cbid.subconv.add.user_agent") or "Happ/SC"
+    local new_format = m:formvalue("cbid.subconv.add.format") or "uri"
+    local new_interval = m:formvalue("cbid.subconv.add.interval") or "1440"
     local new_hwid_val = m:formvalue("cbid.subconv.add.hwid") or sys_hwid
     local new_os = m:formvalue("cbid.subconv.add.device_os") or sys_os
     local new_model = m:formvalue("cbid.subconv.add.device_model") or sys_model
 
     if new_id and new_id ~= "" and new_url and new_url ~= "" then
         new_id = string.gsub(new_id, "[^%w_]", "_")
+
         uci:section("subconv", "subscription", new_id, {
             enabled = "1",
             url = new_url,
@@ -321,12 +324,15 @@ function btn_add.write(self, section)
             hwid = new_hwid_val,
             device_os = new_os,
             device_model = new_model,
-            interval = "1440"
+            format = new_format,
+            interval = new_interval
         })
         uci:set("subconv", "add", "sub_id", "")
         uci:set("subconv", "add", "url", "")
         uci:commit("subconv")
-        sys.call("/usr/libexec/subconv-update.sh " .. new_id)
+        
+        -- Асинхронный запуск, чтобы не вешать интерфейс
+        sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(new_id) .. " >/dev/null 2>&1 &")
         http.redirect(dsp.build_url("admin", "services", "subconv"))
     end
 end
@@ -338,14 +344,21 @@ s_list.template = "cbi/tblsection"
 
 s_list:option(Flag, "enabled", translate("Вкл")).rmempty = false
 s_list:option(Value, "url", translate("URL")).rmempty = false
-s_list:option(Value, "user_agent", translate("User-Agent")).rmempty = false
-s_list:option(Value, "hwid", translate("HWID")).rmempty = false
-s_list:option(Value, "device_os", translate("ОС")).rmempty = false
-s_list:option(Value, "device_model", translate("Модель")).rmempty = false
 
-local interval_opt = s_list:option(Value, "interval", translate("Мин."))
-interval_opt.datatype = "uinteger"
-interval_opt.rmempty = false
+local format_list = s_list:option(ListValue, "format", translate("Формат"))
+format_list:value("uri", "URI")
+format_list:value("raw", "Raw")
+format_list.rmempty = false
+
+s_list:option(Value, "user_agent", translate("User-Agent")).rmempty = false
+
+local interval_list = s_list:option(ListValue, "interval", translate("Обновление"))
+interval_list:value("0", translate("Откл"))
+interval_list:value("30", translate("30 мин"))
+interval_list:value("60", translate("1 час"))
+interval_list:value("360", translate("6 часов"))
+interval_list:value("720", translate("12 часов"))
+interval_list:value("1440", translate("Раз в сутки"))
 
 local link_opt = s_list:option(DummyValue, "_link", translate("Локальная ссылка"))
 function link_opt.cfgvalue(self, section)
@@ -355,16 +368,15 @@ end
 local btn_upd_list = s_list:option(Button, "_update", translate("Обновить"))
 btn_upd_list.inputstyle = "apply"
 function btn_upd_list.write(self, section)
-    sys.call("/usr/libexec/subconv-update.sh " .. section)
-    http.redirect(dsp.build_url("admin", "services", "subconv"))
+    sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(section) .. " >/dev/null 2>&1 &")
 end
 
 local btn_del_list = s_list:option(Button, "_delete", translate("Удалить"))
 btn_del_list.inputstyle = "remove"
 function btn_del_list.write(self, section)
+    os.execute("rm -f " .. util.shellquote("/www/" .. section .. ".txt"))
     uci:delete("subconv", section)
     uci:commit("subconv")
-    os.execute("rm -f /www/" .. section .. ".txt")
     http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
