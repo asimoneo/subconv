@@ -12,6 +12,18 @@ read action
 
 if [ "$action" = "2" ]; then
     echo "Удаление Subconv..."
+    
+    # 1. Читаем конфиг и удаляем все txt файлы, созданные подписками
+    if [ -f /etc/config/subconv ]; then
+        for sub in $(grep -E "config subscription" /etc/config/subconv | awk -F"'" '{print $2}'); do
+            if [ -n "$sub" ]; then
+                echo "Удаление файла: /www/${sub}.txt"
+                rm -f "/www/${sub}.txt"
+            fi
+        done
+    fi
+
+    # 2. Удаляем системные файлы плагина
     rm -f /usr/libexec/subconv-update.sh
     rm -f /usr/libexec/subconv-cron.sh
     rm -f /usr/lib/lua/luci/controller/subconv.lua
@@ -21,14 +33,17 @@ if [ "$action" = "2" ]; then
     rm -f /etc/config/subconv
     rm -f /www/subconv_debug.txt
     
+    # 3. Чистим Cron
     if [ -f /etc/crontabs/root ]; then
         sed -i '/subconv-update.sh/d' /etc/crontabs/root
         /etc/init.d/cron restart
     fi
     
+    # 4. Очищаем кэш
     rm -rf /tmp/luci-* /tmp/rpcd-* /tmp/state/*
     /etc/init.d/rpcd restart
-    echo "✅ Плагин, его конфигурация и интерфейс полностью удалены!"
+    
+    echo "✅ Плагин, конфигурации и все скачанные подписки полностью удалены!"
     exit 0
 fi
 
@@ -55,13 +70,20 @@ local nixio = require "nixio"
 
 local sub_id = arg[1]
 local debug_file = "/www/subconv_debug.txt"
-local f_dbg = io.open(debug_file, "w")
+local f_dbg = io.open(debug_file, "a")
 
 local function log(msg)
     if f_dbg then
         f_dbg:write(os.date("%Y-%m-%d %H:%M:%S") .. " [" .. (sub_id or "NONE") .. "] " .. msg .. "\n")
         f_dbg:flush()
     end
+end
+
+-- Функция для обновления статуса в интерфейсе в реальном времени
+local function save_status(msg)
+    local u = require "luci.model.uci".cursor()
+    u:set("subconv", sub_id, "last_type", msg)
+    u:commit("subconv")
 end
 
 log("=== СТАРТ ОБНОВЛЕНИЯ ===")
@@ -80,12 +102,12 @@ local dev_model = uci:get("subconv", sub_id, "device_model") or "OpenWrt Router"
 
 if not url or url == "" then
     log("Ошибка: URL не задан")
+    save_status("Ошибка: нет URL")
     if f_dbg then f_dbg:close() end
     os.exit(1)
 end
 
 local out_path = "/www/" .. sub_id .. ".txt"
-local data_type = "Ошибка запроса"
 
 local cmd = string.format("curl -k -L -s --connect-timeout 10 --max-time 30 -A %s -H %s -H %s -H %s %s",
     util.shellquote(ua),
@@ -101,6 +123,7 @@ handle:close()
 
 if not resp or #resp == 0 then
     log("Ошибка: пустой ответ сервера или превышен таймаут")
+    save_status("Ошибка загрузки (таймаут)")
 else
     local decoded = resp
     local is_b64 = false
@@ -122,37 +145,32 @@ else
     end
 
     if #links > 0 then
-        if is_b64 then
-            data_type = "Base64 (" .. #links .. " узлов)"
-        else
-            data_type = "Текст (" .. #links .. " узлов)"
-        end
-        
         local f_out = io.open(out_path, "w")
         if f_out then
             f_out:write(table.concat(links, "\n") .. "\n")
             f_out:close()
             log("УСПЕХ: Найдено узлов - " .. #links .. ". Сохранено в " .. out_path)
+            
+            if is_b64 then
+                save_status("Base64 (" .. #links .. " узлов)")
+            else
+                save_status("Текст (" .. #links .. " узлов)")
+            end
         else
             log("Ошибка записи в файл " .. out_path)
-            data_type = "Ошибка записи файла"
+            save_status("Ошибка сохранения файла")
         end
     else
         log("ОШИБКА: не найдено ни одного узла URI")
-        data_type = "Пусто (Нет узлов)"
+        save_status("Пусто (Нет узлов)")
     end
 end
-
--- Обновляем статус в UCI
-uci:load("subconv")
-uci:set("subconv", sub_id, "last_type", data_type)
-uci:commit("subconv")
 
 if f_dbg then f_dbg:close() end
 EOF
 chmod +x /usr/libexec/subconv-update.sh
 
-echo "3. Создание скрипта Cron..."
+echo "3. Создание скрипта Cron (со стабильными интервалами)..."
 cat << 'EOF' > /usr/libexec/subconv-cron.sh
 #!/bin/sh
 . /lib/functions.sh
@@ -373,8 +391,16 @@ interval_list:value("720", translate("12 часов"))
 interval_list:value("1440", translate("24 часа"))
 interval_list.rmempty = false
 
+-- Статус скачивания с авто-обновлением страницы каждые 3 секунды, пока висит "Ожидание" или "Обновление"
 local type_opt = s_list:option(DummyValue, "last_type", translate("Тип выдачи"))
-type_opt.default = "Ожидание..."
+type_opt.rawhtml = true
+function type_opt.cfgvalue(self, section)
+    local val = uci:get("subconv", section, "last_type") or "Ожидание..."
+    if val == "Ожидание..." or val == "Обновление..." then
+        return val .. ' <script>setTimeout(function(){location.reload();}, 3000);</script>'
+    end
+    return val
+end
 
 local link_opt = s_list:option(DummyValue, "_link", translate("Локальная ссылка"))
 link_opt.rawhtml = true
