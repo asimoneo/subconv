@@ -1,7 +1,7 @@
 #!/bin/sh
 
 echo "========================================================="
-echo "        Установка Subconv (Финальная + Анти-Кэш)         "
+echo "        Установка Subconv (Рандомный HWID)               "
 echo "========================================================="
 echo "Выберите действие:"
 echo " 1) Установить / Обновить плагин"
@@ -106,6 +106,7 @@ local out_path = "/www/" .. sub_id .. ".txt"
 
 log("URL: " .. url)
 log("UA: " .. ua)
+log("HWID: " .. hwid)
 
 local cmd = string.format("curl -k -L -s --connect-timeout 10 --max-time 30 -A %s -H %s -H %s -H %s %s",
     util.shellquote(ua),
@@ -301,6 +302,12 @@ if f_hwid_file then
     f_hwid_file:close()
 end
 
+-- Генерация случайного HWID (32 символа, как в Happ)
+local random_hwid = sys.exec("cat /proc/sys/kernel/random/uuid 2>/dev/null"):gsub("-", ""):gsub("%s+", "")
+if not random_hwid or random_hwid == "" then 
+    random_hwid = "happ" .. tostring(os.time())
+end
+
 sys_os = sys_os:gsub("[\r\n]", "")
 sys_model = sys_model:gsub("[\r\n]", "")
 sys_hwid = sys_hwid:gsub("[\r\n]", "")
@@ -328,12 +335,13 @@ f_ua.default = "SubConv/1.0"
 f_ua.rmempty = true
 
 local f_hwid_opt = s_add:option(Value, "hwid", translate("HWID устройства"))
+f_hwid_opt:value(random_hwid, random_hwid .. " (Случайный - По умолчанию)")
 f_hwid_opt:value(sys_hwid, sys_hwid .. " (Ваш роутер)")
 f_hwid_opt:value("windows-pc-hwid-01", "Windows PC")
 f_hwid_opt:value("macbook-pro-hwid-02", "MacBook Pro")
 f_hwid_opt:value("iphone-15-hwid-03", "iPhone 15")
 f_hwid_opt:value("android-phone-hwid-04", "Android Phone")
-f_hwid_opt.default = sys_hwid
+f_hwid_opt.default = random_hwid
 f_hwid_opt.rmempty = true
 
 local f_os = s_add:option(Value, "device_os", translate("OS Устройства"))
@@ -373,7 +381,7 @@ function btn_add.write(self, section)
     local new_url = m:formvalue("cbid.subconv.add.url")
     local new_ua = m:formvalue("cbid.subconv.add.user_agent") or "SubConv/1.0"
     local new_interval = m:formvalue("cbid.subconv.add.interval") or "1440"
-    local new_hwid_val = m:formvalue("cbid.subconv.add.hwid") or sys_hwid
+    local new_hwid_val = m:formvalue("cbid.subconv.add.hwid") or random_hwid
     local new_os = m:formvalue("cbid.subconv.add.device_os") or sys_os
     local new_model = m:formvalue("cbid.subconv.add.device_model") or sys_model
 
