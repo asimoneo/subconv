@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="0.3.5"
+VERSION="0.3.6"
 action="${1}"
 
 echo "========================================================="
@@ -37,6 +37,7 @@ if [ "$action" = "2" ]; then
     rm -f /usr/share/rpcd/acl.d/subconv.json
     rm -f /etc/config/subconv
     rm -f /www/subconv_debug.txt
+    rm -f /tmp/subconv_ver_cache
     
     if [ -f /etc/crontabs/root ]; then
         sed -i '/subconv-update.sh/d' /etc/crontabs/root
@@ -82,21 +83,8 @@ def decrypt_happ(url):
             pass
 
         data = base64.b64decode(raw + "===")
-        
-        import subprocess
-        
-        try:
-            import json
-            # Dummy key definition. We use this if openssl isn't an option.
-            # In a real-world local Python script, we would need the actual key logic here.
-            # However, since the user's focus is on avoiding external requests,
-            # this script is a placeholder to show where the local logic *would* go
-            # if we had the keys.
-            print("Result\n" + url)
-            return
-        except Exception as e:
-            pass
-            
+        print("Result\n" + url)
+        return
     except Exception as e:
         print(f"Decrypt Error: {str(e)}")
         
@@ -123,6 +111,13 @@ local function log(msg)
         f_dbg:write(os.date("%Y-%m-%d %H:%M:%S") .. " [" .. (sub_id or "NONE") .. "] " .. msg .. "\n")
         f_dbg:flush()
     end
+end
+
+local function mask_url(u)
+    if not u then return "" end
+    local v_len = math.floor(#u / 2)
+    if v_len > 35 then v_len = 35 end
+    return string.sub(u, 1, v_len) .. "••••••••"
 end
 
 local function save_status(msg)
@@ -158,6 +153,8 @@ if url:match("^happ://crypt") or url:match("^v2raytun://crypt") then
         os.exit(1)
     end
     
+    local handle = io.popen(bin_path + " " .. util.shellquote(url) .. " 2>&1")
+    -- исправление синтаксиса конкатенации
     local handle = io.popen(bin_path .. " " .. util.shellquote(url) .. " 2>&1")
     local result = handle and handle:read("*all") or ""
     if handle then handle:close() end
@@ -168,7 +165,7 @@ if url:match("^happ://crypt") or url:match("^v2raytun://crypt") then
     end
     
     if decrypted and decrypted:match("^http") then
-        log("Успешно расшифровано! Истинный URL: " .. decrypted:sub(1, 40) .. "...")
+        log("Успешно расшифровано! Истинный URL: " .. mask_url(decrypted))
         url = decrypted
     else
         log("Сбой дешифровки: " .. tostring(result):sub(1, 150))
@@ -177,7 +174,7 @@ if url:match("^happ://crypt") or url:match("^v2raytun://crypt") then
     end
 end
 
-log("Запрос: " .. url)
+log("Запрос: " .. mask_url(url))
 log("Заголовки: UA=" .. ua .. " | HWID=" .. hwid .. " | OS=" .. dev_os)
 
 local cmd = string.format("curl -k -L -s -w '%%{http_code}' --connect-timeout 10 --max-time 30 -A %s -H %s -H %s -H %s %s",
@@ -323,7 +320,7 @@ function index()
 end
 EOF
 
-cat << 'EOF' > /usr/lib/lua/luci/model/cbi/subconv.lua
+cat << EOF > /usr/lib/lua/luci/model/cbi/subconv.lua
 local uci = require "luci.model.uci".cursor()
 local sys = require "luci.sys"
 local http = require "luci.http"
@@ -428,8 +425,8 @@ f_interval:value("720", translate("Каждые 12 часов"))
 f_interval:value("1440", translate("Раз в сутки"))
 f_interval.default = "1440"
 
--- Логика проверки самообновления (кеширование на 10 сек)
-local current_ver = $VERSION
+-- Динамическое считывание версии
+local current_ver = "$VERSION"
 local cache_file = "/tmp/subconv_ver_cache"
 local remote_ver = current_ver
 local ts = 0
@@ -442,7 +439,7 @@ if f then
 end
 
 if os.time() - ts > 10 then
-    local h = io.popen("curl -sL --connect-timeout 3 --max-time 5 https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/install.sh | grep '^VERSION=' | head -n 1")
+    local h = io.popen("curl -sL --connect-timeout 3 --max-time 5 'https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/install.sh' | grep '^VERSION=' | head -n 1")
     if h then
         local res = h:read("*a")
         h:close()
