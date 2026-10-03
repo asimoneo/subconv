@@ -1,7 +1,7 @@
 #!/bin/sh
 
 echo "========================================================="
-echo "        Установка Subconv (Умный парсер + Логи)          "
+echo "        Установка Subconv (Финальная + Анти-Кэш)         "
 echo "========================================================="
 echo "Выберите действие:"
 echo " 1) Установить / Обновить плагин"
@@ -43,9 +43,9 @@ if [ "$action" = "2" ]; then
     exit 0
 fi
 
-echo "0. Проверка и установка зависимостей..."
+echo "0. Проверка зависимостей..."
 if ! command -v curl >/dev/null 2>&1; then
-    echo "Установка curl (требуется для скачивания подписок)..."
+    echo "Установка curl..."
     opkg update
     opkg install curl
 fi
@@ -57,7 +57,7 @@ mkdir -p /usr/lib/lua/luci/controller
 mkdir -p /usr/share/luci/menu.d
 mkdir -p /usr/share/rpcd/acl.d
 
-echo "2. Создание безопасного скрипта обновления..."
+echo "2. Создание скрипта обновления..."
 cat << 'EOF' > /usr/libexec/subconv-update.sh
 #!/usr/bin/lua
 local uci = require "luci.model.uci".cursor()
@@ -104,8 +104,8 @@ end
 
 local out_path = "/www/" .. sub_id .. ".txt"
 
-log("Запрос по URL: " .. url)
-log("Используем User-Agent: " .. ua)
+log("URL: " .. url)
+log("UA: " .. ua)
 
 local cmd = string.format("curl -k -L -s --connect-timeout 10 --max-time 30 -A %s -H %s -H %s -H %s %s",
     util.shellquote(ua),
@@ -120,29 +120,26 @@ local resp = handle:read("*all")
 handle:close()
 
 if not resp or #resp == 0 then
-    log("Ошибка: пустой ответ сервера или превышен таймаут")
-    save_status("Ошибка загрузки (таймаут)")
+    log("Ошибка: пустой ответ сервера или таймаут")
+    save_status("Ошибка загрузки (таймаут/пусто)")
 else
-    log("Получено данных: " .. #resp .. " байт")
+    log("Получено: " .. #resp .. " байт")
     local decoded = resp
     local is_b64 = false
     local maybe_decoded = nixio.bin.b64decode(resp)
     
-    if maybe_decoded and maybe_decoded:match("://") then
-        decoded = maybe_decoded
-        is_b64 = true
-        log("Base64 успешно декодирован")
+    if maybe_decoded then
+        if maybe_decoded:match("://") or maybe_decoded:match("^%s*{") or maybe_decoded:match("^%s*%[") or maybe_decoded:match("proxies:") then
+            decoded = maybe_decoded
+            is_b64 = true
+            log("Base64 успешно декодирован")
+        end
     end
 
-    -- Умный детектор формата (RAW Конфиг или список URI)
     local is_raw = false
-    local first_char = decoded:match("^%s*(.)")
-    if first_char == "{" or first_char == "[" then
+    if decoded:match("^%s*{") or decoded:match("^%s*%[") or decoded:match("proxies:") then
         is_raw = true
-        log("Детектор: Обнаружен JSON формат")
-    elseif decoded:match("\nproxies:") or decoded:match("^proxies:") then
-        is_raw = true
-        log("Детектор: Обнаружен YAML формат")
+        log("Детектор: Обнаружен JSON/YAML формат")
     end
 
     if is_raw then
@@ -150,11 +147,11 @@ else
         if f_out then
             f_out:write(decoded)
             f_out:close()
-            log("УСПЕХ: Файл сохранен как готовый конфиг (JSON/YAML)")
+            log("УСПЕХ: Сохранен как сырой конфиг")
             save_status("JSON/YAML Конфиг")
         else
             log("Ошибка записи в файл " .. out_path)
-            save_status("Ошибка сохранения файла")
+            save_status("Ошибка записи")
         end
     else
         local links = {}
@@ -169,8 +166,7 @@ else
             if f_out then
                 f_out:write(table.concat(links, "\n") .. "\n")
                 f_out:close()
-                log("УСПЕХ: Найдено узлов URI - " .. #links .. ". Сохранено в " .. out_path)
-                
+                log("УСПЕХ: Найдено " .. #links .. " узлов URI")
                 if is_b64 then
                     save_status("Base64 URI (" .. #links .. ")")
                 else
@@ -178,7 +174,7 @@ else
                 end
             else
                 log("Ошибка записи в файл " .. out_path)
-                save_status("Ошибка сохранения файла")
+                save_status("Ошибка записи")
             end
         else
             log("ОШИБКА: Не найдено узлов URI и это не JSON/YAML")
@@ -383,7 +379,6 @@ function btn_add.write(self, section)
 
     if new_id and new_id ~= "" and new_url and new_url ~= "" then
         new_id = string.gsub(new_id, "[^%w_]", "_")
-
         uci:section("subconv", "subscription", new_id, {
             enabled = "1",
             url = new_url,
@@ -474,7 +469,6 @@ function btn_del_list.write(self, section)
     http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
--- Секция с журналом отладки внизу
 local s_log = m:section(TypedSection, "global", translate("Журнал отладки"))
 s_log.anonymous = true
 s_log.addremove = false
@@ -493,12 +487,12 @@ local log_view = s_log:option(DummyValue, "_logview")
 log_view.rawhtml = true
 function log_view.cfgvalue(self, section)
     local f = io.open("/www/subconv_debug.txt", "r")
-    local content = f and f:read("*all") or "Лог пуст. Нажмите «Обновить» на любой подписке для проверки."
+    local content = f and f:read("*all") or "Лог пуст. Нажмите «Обновить» на любой подписке."
     if f then f:close() end
     content = content:gsub("<", "&lt;"):gsub(">", "&gt;")
     
     return string.format(
-        '<textarea readonly wrap="off" style="width: 100%%; height: 350px; background: #1a1b26; color: #a9b1d6; font-family: monospace; font-size: 13px; padding: 10px; resize: vertical; border: 1px solid #333; margin-top: 10px;">%s</textarea>' ..
+        '<textarea readonly wrap="off" style="width: 100%%; height: 300px; background: #1a1b26; color: #a9b1d6; font-family: monospace; font-size: 13px; padding: 10px; resize: vertical; border: 1px solid #333; margin-top: 10px;">%s</textarea>' ..
         '<script>setTimeout(function(){var t=document.getElementsByTagName("textarea");var l=t[t.length-1];if(l){l.scrollTop=l.scrollHeight;}}, 100);</script>', 
         content
     )
