@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 
 echo "========================================================="
 echo "        Установка Subconv v$VERSION                      "
@@ -61,6 +61,7 @@ cat << 'EOF' > /usr/libexec/subconv-update.sh
 local uci = require "luci.model.uci".cursor()
 local util = require "luci.util"
 local nixio = require "nixio"
+local sys = require "luci.sys"
 
 local sub_id = arg[1]
 local debug_file = "/www/subconv_debug.txt"
@@ -98,30 +99,43 @@ local out_path = "/www/" .. sub_id .. ".txt"
 
 if url:match("^happ://crypt") or url:match("^v2raytun://crypt") then
     log("Обнаружена крипто-ссылка. Запуск локальной дешифровки...")
-    local arch = util.trim(sys.exec("uname -m"))
+    local arch = sys.exec("uname -m") or ""
+    arch = arch:gsub("%s+", "")
     local bin_path = "/usr/libexec/happ-decrypt"
     
-    if not nixio.fs.access(bin_path) then
+    local need_dl = true
+    local f_bin = io.open(bin_path, "r")
+    if f_bin then
+        local size = f_bin:seek("end")
+        f_bin:close()
+        if size and size > 50000 then 
+            need_dl = false 
+        end
+    end
+    
+    if need_dl then
         log("Скачивание нативного дешифратора amurcanov для архитектуры: " .. arch)
         local dl_cmd = ""
         if arch:match("aarch64") or arch:match("armv8") then
-            dl_cmd = "curl -sL https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/android-arm64-v8a -o " .. bin_path
+            dl_cmd = "curl -sL --connect-timeout 10 --max-time 60 https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/android-arm64-v8a -o " .. bin_path
         elseif arch:match("x86_64") then
-            dl_cmd = "curl -sL https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/linux-x64_x86 -o " .. bin_path
+            dl_cmd = "curl -sL --connect-timeout 10 --max-time 60 https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/linux-x64_x86 -o " .. bin_path
         elseif arch:match("arm") then
-            dl_cmd = "curl -sL https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/android-armeabi-v7a -o " .. bin_path
+            dl_cmd = "curl -sL --connect-timeout 10 --max-time 60 https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/android-armeabi-v7a -o " .. bin_path
         else
             log("ОШИБКА: Архитектура " .. arch .. " не поддерживается бинарниками.")
             save_status("Ошибка архитектуры")
             os.exit(1)
         end
         os.execute(dl_cmd)
-        os.execute("chmod +x " .. bin_path)
     end
     
-    local handle = io.popen(bin_path .. " " .. util.shellquote(url) .. " 2>&1")
-    local result = handle:read("*all")
-    handle:close()
+    os.execute("chmod +x " .. bin_path)
+    log("Запуск бинарника: " .. bin_path)
+    
+    local handle = io.popen("timeout 10 " .. bin_path .. " " .. util.shellquote(url) .. " 2>&1")
+    local result = handle and handle:read("*all") or ""
+    if handle then handle:close() end
     
     local decrypted = result:match("Result\r?\n(https?://%S+)")
     if not decrypted then
@@ -132,7 +146,7 @@ if url:match("^happ://crypt") or url:match("^v2raytun://crypt") then
         log("Успешно расшифровано! Истинный URL: " .. decrypted:sub(1, 40) .. "...")
         url = decrypted
     else
-        log("Сбой дешифровки (проверьте совместимость libc): " .. tostring(result):sub(1, 150))
+        log("Сбой дешифровки: " .. tostring(result):sub(1, 150))
         save_status("Сбой дешифровки")
         os.exit(1)
     end
@@ -407,7 +421,6 @@ function f_js.cfgvalue()
     return [[
         <script>
             setTimeout(function() {
-                // Выстраиваем описания в строку
                 document.querySelectorAll('#cbi-subconv-add .cbi-value').forEach(function(el) {
                     var field = el.querySelector('.cbi-value-field');
                     var desc = el.querySelector('.cbi-value-description');
@@ -422,10 +435,9 @@ function f_js.cfgvalue()
                     }
                 });
                 
-                // Подмена главного заголовка на ссылку с версией
                 var title = document.querySelector('h2');
                 if(title && title.innerText.includes('Subconv')) {
-                    title.innerHTML = '<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;">v0.3.0</span>';
+                    title.innerHTML = '<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;">v0.3.1</span>';
                 }
             }, 100);
         </script>
