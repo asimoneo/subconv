@@ -1,7 +1,7 @@
 #!/bin/sh
 
 echo "========================================================="
-echo "        Установка Subconv (Полный HWID)                  "
+echo "        Установка Subconv (User-Agent редактируется)     "
 echo "========================================================="
 echo "Выберите действие:"
 echo " 1) Установить / Обновить плагин"
@@ -93,7 +93,10 @@ end
 
 local out_path = "/www/" .. sub_id .. ".txt"
 
-local cmd = string.format("curl -k -L -s --connect-timeout 10 --max-time 30 -A %s -H %s -H %s -H %s %s",
+log("Запрос: " .. url)
+log("Заголовки: UA=" .. ua .. " | HWID=" .. hwid .. " | OS=" .. dev_os)
+
+local cmd = string.format("curl -k -L -s -w '%%{http_code}' --connect-timeout 10 --max-time 30 -A %s -H %s -H %s -H %s %s",
     util.shellquote(ua),
     util.shellquote("X-HWID: " .. hwid),
     util.shellquote("X-DEVICE-OS: " .. dev_os),
@@ -102,12 +105,23 @@ local cmd = string.format("curl -k -L -s --connect-timeout 10 --max-time 30 -A %
 )
 
 local handle = io.popen(cmd)
-local resp = handle:read("*all")
+local resp_raw = handle:read("*all")
 handle:close()
 
-if not resp or #resp == 0 then
-    log("Ошибка: пустой ответ или таймаут")
-    save_status("Ошибка (таймаут/пусто)")
+if not resp_raw or #resp_raw < 3 then
+    log("ОШИБКА: Сервер не ответил (сбой сети или таймаут)")
+    save_status("Ошибка сети")
+    os.exit(1)
+end
+
+local http_code = resp_raw:sub(-3)
+local resp = resp_raw:sub(1, -4)
+
+log("HTTP Код: " .. tostring(http_code))
+
+if #resp == 0 then
+    log("ОШИБКА: Пустое тело ответа")
+    save_status("Ошибка (HTTP " .. http_code .. "/Пусто)")
 else
     local decoded = resp
     local is_b64 = false
@@ -117,6 +131,7 @@ else
         if maybe_decoded:match("://") or maybe_decoded:match("^%s*{") or maybe_decoded:match("^%s*%[") or maybe_decoded:match("proxies:") then
             decoded = maybe_decoded
             is_b64 = true
+            log("Декодирован Base64")
         end
     end
 
@@ -130,8 +145,10 @@ else
         if f_out then
             f_out:write(decoded)
             f_out:close()
+            log("УСПЕХ: Сохранен как сырой конфиг (JSON/YAML)")
             save_status("JSON/YAML Конфиг")
         else
+            log("ОШИБКА: Не удалось записать файл " .. out_path)
             save_status("Ошибка записи")
         end
     else
@@ -145,11 +162,14 @@ else
             if f_out then
                 f_out:write(table.concat(links, "\n") .. "\n")
                 f_out:close()
+                log("УСПЕХ: Найдено " .. #links .. " узлов URI")
                 if is_b64 then save_status("Base64 URI (" .. #links .. ")") else save_status("Текст URI (" .. #links .. ")") end
             else
                 save_status("Ошибка записи")
             end
         else
+            local snippet = decoded:sub(1, 50):gsub("[%c\n\r]", " ")
+            log("ОШИБКА: Узлы не найдены. Начало ответа: " .. snippet)
             save_status("Пусто (Нет узлов)")
         end
     end
@@ -256,7 +276,7 @@ if f_hwid_file then
     f_hwid_file:close()
 end
 
-local random_hwid = sys.exec("cat /proc/sys/kernel/random/uuid 2>/dev/null"):gsub("-", ""):gsub("%s+", "")
+local random_hwid = sys.exec("cat /proc/sys/kernel/random/uuid 2>/dev/null"):gsub("-", ""):gsub("%s+", ""):sub(1, 16)
 if not random_hwid or random_hwid == "" then random_hwid = "happ" .. tostring(os.time()) end
 
 sys_os = sys_os:gsub("[\r\n]", "")
@@ -275,7 +295,7 @@ local f_url = s_add:option(Value, "url", translate("URL подписки"))
 f_url.rmempty = true
 
 local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
-f_ua:value("SubConv/1.0", "SubConv/1.0")
+f_ua:value("SubConv/1.0", "SubConv/1.0 (По умолчанию)")
 f_ua:value("sing-box/1.9.3", "sing-box 1.9.3")
 f_ua:value("mihomo/1.18.3", "mihomo 1.18.3 (Clash.Meta)")
 f_ua:value("Happ/SC", "Happ/SC")
@@ -285,7 +305,7 @@ f_ua.default = "SubConv/1.0"
 f_ua.rmempty = true
 
 local f_hwid_opt = s_add:option(Value, "hwid", translate("HWID устройства"))
-f_hwid_opt:value(random_hwid, random_hwid .. " (Случайный)")
+f_hwid_opt:value(random_hwid, random_hwid .. " (Случайный - По умолчанию)")
 f_hwid_opt:value(sys_hwid, sys_hwid .. " (Ваш роутер)")
 f_hwid_opt.default = random_hwid
 f_hwid_opt.rmempty = true
@@ -349,11 +369,13 @@ s_list.template = "cbi/tblsection"
 
 local en = s_list:option(Flag, "enabled", translate("Вкл"))
 en.rmempty = false
-en.default = "1"
 
-local url_list = s_list:option(Value, "url", translate("URL"))
-url_list.rmempty = false
-url_list.size = "40"
+local url_list = s_list:option(DummyValue, "url", translate("URL"))
+url_list.rawhtml = true
+function url_list.cfgvalue(self, section)
+    local val = uci:get("subconv", section, "url") or ""
+    return string.format('<div style="max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="%s">%s</div>', val, val)
+end
 
 local ua_list = s_list:option(Value, "user_agent", translate("User-Agent"))
 ua_list.size = "12"
@@ -367,11 +389,20 @@ local hwid_opt = s_list:option(DummyValue, "hwid", translate("HWID"))
 hwid_opt.rawhtml = true
 function hwid_opt.cfgvalue(self, section)
     local val = uci:get("subconv", section, "hwid") or ""
-    return string.format('<div style="word-break: break-all; min-width: 120px; font-size: 11px; line-height: 1.2;">%s</div>', val)
+    return string.format('<div style="font-family: monospace; font-size: 11px; white-space: nowrap;">%s</div>', val)
 end
 
-s_list:option(DummyValue, "device_os", translate("OS"))
-s_list:option(DummyValue, "device_model", translate("Модель"))
+local os_opt = s_list:option(DummyValue, "device_os", translate("OS"))
+os_opt.rawhtml = true
+function os_opt.cfgvalue(self, section)
+    return string.format('<div style="font-size: 11px;">%s</div>', uci:get("subconv", section, "device_os") or "")
+end
+
+local model_opt = s_list:option(DummyValue, "device_model", translate("Модель"))
+model_opt.rawhtml = true
+function model_opt.cfgvalue(self, section)
+    return string.format('<div style="font-size: 11px;">%s</div>', uci:get("subconv", section, "device_model") or "")
+end
 
 local interval_list = s_list:option(ListValue, "interval", translate("Обновление"))
 interval_list:value("0", translate("Откл"))
@@ -397,7 +428,7 @@ link_opt.rawhtml = true
 function link_opt.cfgvalue(self, section)
     local display_url = "http://127.0.0.1/" .. section .. ".txt"
     local href_url = "/" .. section .. ".txt"
-    return string.format('<div style="line-height: 1.4;"><b>%s</b><br><a href="%s" target="_blank" title="Открыть файл">%s</a></div>', section, href_url, display_url)
+    return string.format('<div style="line-height: 1.4; white-space: nowrap;"><b>%s</b><br><a href="%s" target="_blank" title="Открыть файл">%s</a></div>', section, href_url, display_url)
 end
 
 local btn_upd_list = s_list:option(Button, "_update", translate(" "))
@@ -439,7 +470,7 @@ function log_view.cfgvalue(self, section)
     local content = f and f:read("*all") or "Лог пуст. Нажмите 🔄 на любой подписке."
     if f then f:close() end
     content = content:gsub("<", "&lt;"):gsub(">", "&gt;")
-    return string.format('<textarea readonly wrap="off" style="width: 100%%; height: 300px; background: #1a1b26; color: #a9b1d6; font-family: monospace; font-size: 13px; padding: 10px; border: 1px solid #333; margin-top: 10px;">%s</textarea><script>setTimeout(function(){var t=document.getElementsByTagName("textarea");var l=t[t.length-1];if(l){l.scrollTop=l.scrollHeight;}}, 100);</script>', content)
+    return string.format('<textarea readonly wrap="off" style="width: 100%%; height: 350px; background: #1a1b26; color: #a9b1d6; font-family: monospace; font-size: 13px; padding: 10px; border: 1px solid #333; margin-top: 10px;">%s</textarea><script>setTimeout(function(){var t=document.getElementsByTagName("textarea");var l=t[t.length-1];if(l){l.scrollTop=l.scrollHeight;}}, 100);</script>', content)
 end
 
 function m.on_after_commit(self)
