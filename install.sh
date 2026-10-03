@@ -73,11 +73,10 @@ end
 
 uci:load("subconv")
 local url = uci:get("subconv", sub_id, "url")
-local ua = uci:get("subconv", sub_id, "user_agent") or "Happ/SC"
+local ua = uci:get("subconv", sub_id, "user_agent") or "SubConv/1.0"
 local hwid = uci:get("subconv", sub_id, "hwid") or "openwrt-router-default"
 local dev_os = uci:get("subconv", sub_id, "device_os") or "OpenWrt"
 local dev_model = uci:get("subconv", sub_id, "device_model") or "OpenWrt Router"
-local format = uci:get("subconv", sub_id, "format") or "uri"
 
 if not url or url == "" then
     log("Ошибка: URL не задан")
@@ -86,8 +85,8 @@ if not url or url == "" then
 end
 
 local out_path = "/www/" .. sub_id .. ".txt"
+local data_type = "Ошибка запроса"
 
--- Безопасная передача аргументов с таймаутом
 local cmd = string.format("curl -k -L -s --connect-timeout 10 --max-time 30 -A %s -H %s -H %s -H %s %s",
     util.shellquote(ua),
     util.shellquote("X-HWID: " .. hwid),
@@ -102,23 +101,14 @@ handle:close()
 
 if not resp or #resp == 0 then
     log("Ошибка: пустой ответ сервера или превышен таймаут")
-    if f_dbg then f_dbg:close() end
-    os.exit(1)
-end
-
-if format == "raw" then
-    log("Режим RAW: сохраняем файл без изменений")
-    local f_out = io.open(out_path, "w")
-    if f_out then
-        f_out:write(resp)
-        f_out:close()
-        log("УСПЕХ: сохранено в " .. out_path)
-    end
 else
     local decoded = resp
+    local is_b64 = false
     local maybe_decoded = nixio.bin.b64decode(resp)
+    
     if maybe_decoded and maybe_decoded:match("://") then
         decoded = maybe_decoded
+        is_b64 = true
         log("Base64 успешно декодирован через nixio")
     else
         log("Открытый текст (или не удалось декодировать Base64)")
@@ -132,6 +122,12 @@ else
     end
 
     if #links > 0 then
+        if is_b64 then
+            data_type = "Base64 (" .. #links .. " узлов)"
+        else
+            data_type = "Текст (" .. #links .. " узлов)"
+        end
+        
         local f_out = io.open(out_path, "w")
         if f_out then
             f_out:write(table.concat(links, "\n") .. "\n")
@@ -139,16 +135,24 @@ else
             log("УСПЕХ: Найдено узлов - " .. #links .. ". Сохранено в " .. out_path)
         else
             log("Ошибка записи в файл " .. out_path)
+            data_type = "Ошибка записи файла"
         end
     else
         log("ОШИБКА: не найдено ни одного узла URI")
+        data_type = "Пусто (Нет узлов)"
     end
 end
+
+-- Обновляем статус в UCI
+uci:load("subconv")
+uci:set("subconv", sub_id, "last_type", data_type)
+uci:commit("subconv")
+
 if f_dbg then f_dbg:close() end
 EOF
 chmod +x /usr/libexec/subconv-update.sh
 
-echo "3. Создание скрипта Cron (с правильными интервалами)..."
+echo "3. Создание скрипта Cron..."
 cat << 'EOF' > /usr/libexec/subconv-cron.sh
 #!/bin/sh
 . /lib/functions.sh
@@ -274,14 +278,15 @@ local f_url = s_add:option(Value, "url", translate("URL подписки"))
 f_url.rmempty = true
 
 local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
-f_ua.default = "Happ/SC"
-f_ua.description = translate("влияет на выдачу, например Happ / sing-box / и т.д.")
+f_ua.description = translate("Определяет формат выдачи сервером (выберите из списка или введите свой вручную)")
+f_ua:value("SubConv/1.0", "SubConv/1.0 (По умолчанию)")
+f_ua:value("sing-box/1.9.3", "sing-box 1.9.3")
+f_ua:value("mihomo/1.18.3", "mihomo 1.18.3 (Clash.Meta)")
+f_ua:value("Happ/SC", "Happ/SC")
+f_ua:value("v2rayN/6.42", "v2rayN 6.42")
+f_ua:value("Shadowrocket/1982", "Shadowrocket/1982")
+f_ua.default = "SubConv/1.0"
 f_ua.rmempty = true
-
-local f_format = s_add:option(ListValue, "format", translate("Формат"))
-f_format:value("uri", "URI (vless://...)")
-f_format:value("raw", "Raw (Оставить как есть YAML/JSON)")
-f_format.default = "uri"
 
 local f_interval = s_add:option(ListValue, "interval", translate("Интервал обновления"))
 f_interval:value("0", translate("Отключено"))
@@ -309,8 +314,7 @@ btn_add.inputstyle = "add"
 function btn_add.write(self, section)
     local new_id = m:formvalue("cbid.subconv.add.sub_id")
     local new_url = m:formvalue("cbid.subconv.add.url")
-    local new_ua = m:formvalue("cbid.subconv.add.user_agent") or "Happ/SC"
-    local new_format = m:formvalue("cbid.subconv.add.format") or "uri"
+    local new_ua = m:formvalue("cbid.subconv.add.user_agent") or "SubConv/1.0"
     local new_interval = m:formvalue("cbid.subconv.add.interval") or "1440"
     local new_hwid_val = m:formvalue("cbid.subconv.add.hwid") or sys_hwid
     local new_os = m:formvalue("cbid.subconv.add.device_os") or sys_os
@@ -326,14 +330,13 @@ function btn_add.write(self, section)
             hwid = new_hwid_val,
             device_os = new_os,
             device_model = new_model,
-            format = new_format,
-            interval = new_interval
+            interval = new_interval,
+            last_type = "Ожидание..."
         })
         uci:set("subconv", "add", "sub_id", "")
         uci:set("subconv", "add", "url", "")
         uci:commit("subconv")
         
-        -- Асинхронный запуск, чтобы не вешать интерфейс
         sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(new_id) .. " >/dev/null 2>&1 &")
         http.redirect(dsp.build_url("admin", "services", "subconv"))
     end
@@ -352,12 +355,14 @@ en.disabled = "0"
 
 s_list:option(Value, "url", translate("URL")).rmempty = false
 
-local format_list = s_list:option(ListValue, "format", translate("Формат"))
-format_list:value("uri", "URI")
-format_list:value("raw", "Raw")
-format_list.rmempty = false
-
-s_list:option(Value, "user_agent", translate("User-Agent")).rmempty = false
+local ua_list = s_list:option(Value, "user_agent", translate("User-Agent"))
+ua_list:value("SubConv/1.0", "SubConv/1.0")
+ua_list:value("sing-box/1.9.3", "sing-box 1.9.3")
+ua_list:value("mihomo/1.18.3", "mihomo 1.18.3")
+ua_list:value("Happ/SC", "Happ/SC")
+ua_list:value("v2rayN/6.42", "v2rayN 6.42")
+ua_list:value("Shadowrocket/1982", "Shadowrocket/1982")
+ua_list.rmempty = false
 
 local interval_list = s_list:option(ListValue, "interval", translate("Обновление"))
 interval_list:value("0", translate("Откл"))
@@ -367,6 +372,9 @@ interval_list:value("360", translate("6 часов"))
 interval_list:value("720", translate("12 часов"))
 interval_list:value("1440", translate("24 часа"))
 interval_list.rmempty = false
+
+local type_opt = s_list:option(DummyValue, "last_type", translate("Тип выдачи"))
+type_opt.default = "Ожидание..."
 
 local link_opt = s_list:option(DummyValue, "_link", translate("Локальная ссылка"))
 link_opt.rawhtml = true
@@ -379,7 +387,10 @@ end
 local btn_upd_list = s_list:option(Button, "_update", translate("Обновить"))
 btn_upd_list.inputstyle = "apply"
 function btn_upd_list.write(self, section)
+    uci:set("subconv", section, "last_type", "Обновление...")
+    uci:commit("subconv")
     sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(section) .. " >/dev/null 2>&1 &")
+    http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
 local btn_del_list = s_list:option(Button, "_delete", translate("Удалить"))
