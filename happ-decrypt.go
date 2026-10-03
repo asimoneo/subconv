@@ -16,8 +16,9 @@ func main() {
 		return
 	}
 	originalInput := os.Args[1]
-	input := originalInput
+	input := strings.TrimSpace(originalInput)
 
+	// Убираем префиксы протоколов
 	prefixes := []string{"happ://crypt5/", "happ://crypt4/", "happ://crypt3/", "v2raytun://crypt/"}
 	for _, p := range prefixes {
 		if strings.HasPrefix(input, p) {
@@ -26,19 +27,26 @@ func main() {
 		}
 	}
 
-	// 1. Декодируем URL (например %2B -> +)
-	unescaped, err := url.QueryUnescape(input)
-	if err == nil {
+	// Декодируем URL-энкодинг (%2B, %3D и т.д.)
+	if unescaped, err := url.QueryUnescape(input); err == nil {
 		input = unescaped
 	}
-	// QueryUnescape превращает '+' в пробел. Возвращаем обратно:
-	input = strings.ReplaceAll(input, " ", "+")
 
-	// 2. Универсальный Base64 (поддержка URL-safe формата)
+	// QueryUnescape превращает '+' в пробел. Возвращаем обратно + заменяем URL-safe символы
+	input = strings.ReplaceAll(input, " ", "+")
 	input = strings.ReplaceAll(input, "-", "+")
 	input = strings.ReplaceAll(input, "_", "/")
 
-	// 3. Восстанавливаем паддинг
+	// ЖЕСТКАЯ ОЧИСТКА: вырезаем переносы строк (\n, \r) и любой мусор
+	var clean strings.Builder
+	for _, r := range input {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '+' || r == '/' || r == '=' {
+			clean.WriteRune(r)
+		}
+	}
+	input = clean.String()
+
+	// Восстанавливаем паддинг, если строка обрезана
 	if pad := len(input) % 4; pad != 0 {
 		input += strings.Repeat("=", 4-pad)
 	}
