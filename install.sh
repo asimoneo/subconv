@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="0.3.2"
+VERSION="0.3.3"
 action="${1}"
 
 echo "========================================================="
@@ -113,7 +113,6 @@ if url:match("^happ://crypt") or url:match("^v2raytun://crypt") then
     end
     
     log("Запуск бинарника: " .. bin_path)
-    -- Удалена команда timeout, так как она отсутствует в некоторых прошивках
     local handle = io.popen(bin_path .. " " .. util.shellquote(url) .. " 2>&1")
     local result = handle and handle:read("*all") or ""
     if handle then handle:close() end
@@ -409,7 +408,7 @@ function f_decrypt.cfgvalue()
 end
 
 -- Логика проверки самообновления (кеширование на 10 сек)
-local current_ver = "0.3.2"
+local current_ver = "0.3.3"
 local cache_file = "/tmp/subconv_ver_cache"
 local remote_ver = current_ver
 local ts = 0
