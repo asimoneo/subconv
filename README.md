@@ -1,6 +1,6 @@
 # Subconv (OpenWrt Subscription Converter)
 
-<img width="902" height="645" alt="image" src="https://github.com/user-attachments/assets/d21edd11-da7b-4546-afc4-241ee6d67459" />
+<img width="925" height="707" alt="Снимок экрана 2026-10-03 120505" src="https://github.com/user-attachments/assets/93b9f133-c420-4ed5-8186-34f8178ddcd9" />
 
 
 **Subconv** — это плагин с веб-интерфейсом LuCI для OpenWrt. Предназначен для автоматической загрузки, умного парсинга (Base64, JSON, YAML) и конвертации прокси-подписок из https:// ссылок (пока не включая протоколы `vless://`, `happ://` и др.) в чистые локальные списки узлов для клиентов вроде **Re:HomeProxy**.
