@@ -169,9 +169,11 @@ add_cron() {
             360) cron_expr="0 */6 * * *" ;;
             720) cron_expr="0 */12 * * *" ;;
             1440) cron_expr="0 4 * * *" ;;
-            *) cron_expr="0 4 * * *" ;;
         esac
-        echo "$cron_expr /usr/libexec/subconv-update.sh $cfg >/dev/null 2>&1" >> /etc/crontabs/root
+        
+        if [ -n "$cron_expr" ]; then
+            echo "$cron_expr /usr/libexec/subconv-update.sh $cfg >/dev/null 2>&1" >> /etc/crontabs/root
+        fi
     fi
 }
 config_load subconv
@@ -281,7 +283,7 @@ f_format:value("uri", "URI (vless://...)")
 f_format:value("raw", "Raw (Оставить как есть YAML/JSON)")
 f_format.default = "uri"
 
-local f_interval = s_add:option(ListValue, "interval", translate("Обновление"))
+local f_interval = s_add:option(ListValue, "interval", translate("Интервал обновления"))
 f_interval:value("0", translate("Отключено"))
 f_interval:value("30", translate("Каждые 30 мин"))
 f_interval:value("60", translate("Каждый 1 час"))
@@ -342,7 +344,12 @@ s_list.anonymous = true
 s_list.addremove = false
 s_list.template = "cbi/tblsection"
 
-s_list:option(Flag, "enabled", translate("Вкл")).rmempty = false
+local en = s_list:option(Flag, "enabled", translate("Вкл"))
+en.rmempty = false
+en.default = "1"
+en.enabled = "1"
+en.disabled = "0"
+
 s_list:option(Value, "url", translate("URL")).rmempty = false
 
 local format_list = s_list:option(ListValue, "format", translate("Формат"))
@@ -358,11 +365,15 @@ interval_list:value("30", translate("30 мин"))
 interval_list:value("60", translate("1 час"))
 interval_list:value("360", translate("6 часов"))
 interval_list:value("720", translate("12 часов"))
-interval_list:value("1440", translate("Раз в сутки"))
+interval_list:value("1440", translate("24 часа"))
+interval_list.rmempty = false
 
 local link_opt = s_list:option(DummyValue, "_link", translate("Локальная ссылка"))
+link_opt.rawhtml = true
 function link_opt.cfgvalue(self, section)
-    return "http://127.0.0.1/" .. section .. ".txt"
+    local display_url = "http://127.0.0.1/" .. section .. ".txt"
+    local href_url = "/" .. section .. ".txt"
+    return string.format('<a href="%s" target="_blank" title="Кликните для просмотра файла">%s</a>', href_url, display_url)
 end
 
 local btn_upd_list = s_list:option(Button, "_update", translate("Обновить"))
