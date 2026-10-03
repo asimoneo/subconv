@@ -20,7 +20,7 @@ readme и код навайбкодены и никаких гарантий ч�
 Подключитесь к вашему роутеру по SSH и выполните следующую команду:
 
 ```sh
-sh -c "$(curl -fsSL [https://raw.githubusercontent.com/asimoneo/subconv/main/install.sh](https://raw.githubusercontent.com/asimoneo/subconv/main/install.sh))"
+sh -c "$(wget -qO- https://raw.githubusercontent.com/asimoneo/subconv/main/install.sh || curl -fsSL https://raw.githubusercontent.com/asimoneo/subconv/main/install.sh)"
 ```
 
 Скрипт интерактивный. При запуске он предложит:
@@ -51,7 +51,7 @@ sh -c "$(curl -fsSL [https://raw.githubusercontent.com/asimoneo/subconv/main/ins
 Для полного удаления плагина, его настроек и графического интерфейса, снова запустите установочный скрипт по SSH и выберите пункт `2`:
 
 ```sh
-sh -c "$(curl -fsSL [https://raw.githubusercontent.com/asimoneo/subconv/main/install.sh](https://raw.githubusercontent.com/asimoneo/subconv/main/install.sh))"
+sh -c "$(wget -qO- https://raw.githubusercontent.com/asimoneo/subconv/main/install.sh || curl -fsSL https://raw.githubusercontent.com/asimoneo/subconv/main/install.sh)"
 ```
 
 ## 🛠 Траблшутинг (Решение проблем)
