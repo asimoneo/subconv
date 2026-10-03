@@ -1,7 +1,7 @@
 #!/bin/sh
 
 echo "========================================================="
-echo "        Установка Subconv (Рандомный HWID)               "
+echo "        Установка Subconv (Полный HWID)                  "
 echo "========================================================="
 echo "Выберите действие:"
 echo " 1) Установить / Обновить плагин"
@@ -16,7 +16,6 @@ if [ "$action" = "2" ]; then
     if [ -f /etc/config/subconv ]; then
         for sub in $(grep -E "config subscription" /etc/config/subconv | awk -F"'" '{print $2}'); do
             if [ -n "$sub" ]; then
-                echo "Удаление файла: /www/${sub}.txt"
                 rm -f "/www/${sub}.txt"
             fi
         done
@@ -39,25 +38,21 @@ if [ "$action" = "2" ]; then
     rm -rf /tmp/luci-* /tmp/rpcd-* /tmp/state/*
     /etc/init.d/rpcd restart
     
-    echo "✅ Плагин, конфигурации и все скачанные подписки полностью удалены!"
+    echo "✅ Плагин полностью удален!"
     exit 0
 fi
 
-echo "0. Проверка зависимостей..."
 if ! command -v curl >/dev/null 2>&1; then
-    echo "Установка curl..."
     opkg update
     opkg install curl
 fi
 
-echo "1. Создание системных директорий..."
 mkdir -p /usr/libexec
 mkdir -p /usr/lib/lua/luci/model/cbi
 mkdir -p /usr/lib/lua/luci/controller
 mkdir -p /usr/share/luci/menu.d
 mkdir -p /usr/share/rpcd/acl.d
 
-echo "2. Создание скрипта обновления..."
 cat << 'EOF' > /usr/libexec/subconv-update.sh
 #!/usr/bin/lua
 local uci = require "luci.model.uci".cursor()
@@ -82,11 +77,7 @@ local function save_status(msg)
 end
 
 log("=== СТАРТ ОБНОВЛЕНИЯ ===")
-if not sub_id then
-    log("Ошибка: не указан ID подписки")
-    if f_dbg then f_dbg:close() end
-    os.exit(1)
-end
+if not sub_id then os.exit(1) end
 
 uci:load("subconv")
 local url = uci:get("subconv", sub_id, "url")
@@ -96,17 +87,11 @@ local dev_os = uci:get("subconv", sub_id, "device_os") or "OpenWrt"
 local dev_model = uci:get("subconv", sub_id, "device_model") or "OpenWrt Router"
 
 if not url or url == "" then
-    log("Ошибка: URL не задан")
     save_status("Ошибка: нет URL")
-    if f_dbg then f_dbg:close() end
     os.exit(1)
 end
 
 local out_path = "/www/" .. sub_id .. ".txt"
-
-log("URL: " .. url)
-log("UA: " .. ua)
-log("HWID: " .. hwid)
 
 local cmd = string.format("curl -k -L -s --connect-timeout 10 --max-time 30 -A %s -H %s -H %s -H %s %s",
     util.shellquote(ua),
@@ -121,10 +106,9 @@ local resp = handle:read("*all")
 handle:close()
 
 if not resp or #resp == 0 then
-    log("Ошибка: пустой ответ сервера или таймаут")
-    save_status("Ошибка загрузки (таймаут/пусто)")
+    log("Ошибка: пустой ответ или таймаут")
+    save_status("Ошибка (таймаут/пусто)")
 else
-    log("Получено: " .. #resp .. " байт")
     local decoded = resp
     local is_b64 = false
     local maybe_decoded = nixio.bin.b64decode(resp)
@@ -133,14 +117,12 @@ else
         if maybe_decoded:match("://") or maybe_decoded:match("^%s*{") or maybe_decoded:match("^%s*%[") or maybe_decoded:match("proxies:") then
             decoded = maybe_decoded
             is_b64 = true
-            log("Base64 успешно декодирован")
         end
     end
 
     local is_raw = false
     if decoded:match("^%s*{") or decoded:match("^%s*%[") or decoded:match("proxies:") then
         is_raw = true
-        log("Детектор: Обнаружен JSON/YAML формат")
     end
 
     if is_raw then
@@ -148,18 +130,14 @@ else
         if f_out then
             f_out:write(decoded)
             f_out:close()
-            log("УСПЕХ: Сохранен как сырой конфиг")
             save_status("JSON/YAML Конфиг")
         else
-            log("Ошибка записи в файл " .. out_path)
             save_status("Ошибка записи")
         end
     else
         local links = {}
         for line in decoded:gmatch("[^\r\n]+") do
-            if line:match("://") then
-                table.insert(links, line)
-            end
+            if line:match("://") then table.insert(links, line) end
         end
 
         if #links > 0 then
@@ -167,18 +145,11 @@ else
             if f_out then
                 f_out:write(table.concat(links, "\n") .. "\n")
                 f_out:close()
-                log("УСПЕХ: Найдено " .. #links .. " узлов URI")
-                if is_b64 then
-                    save_status("Base64 URI (" .. #links .. ")")
-                else
-                    save_status("Текст URI (" .. #links .. ")")
-                end
+                if is_b64 then save_status("Base64 URI (" .. #links .. ")") else save_status("Текст URI (" .. #links .. ")") end
             else
-                log("Ошибка записи в файл " .. out_path)
                 save_status("Ошибка записи")
             end
         else
-            log("ОШИБКА: Не найдено узлов URI и это не JSON/YAML")
             save_status("Пусто (Нет узлов)")
         end
     end
@@ -188,7 +159,6 @@ if f_dbg then f_dbg:close() end
 EOF
 chmod +x /usr/libexec/subconv-update.sh
 
-echo "3. Создание скрипта Cron..."
 cat << 'EOF' > /usr/libexec/subconv-cron.sh
 #!/bin/sh
 . /lib/functions.sh
@@ -210,10 +180,7 @@ add_cron() {
             720) cron_expr="0 */12 * * *" ;;
             1440) cron_expr="0 4 * * *" ;;
         esac
-        
-        if [ -n "$cron_expr" ]; then
-            echo "$cron_expr /usr/libexec/subconv-update.sh $cfg >/dev/null 2>&1" >> /etc/crontabs/root
-        fi
+        if [ -n "$cron_expr" ]; then echo "$cron_expr /usr/libexec/subconv-update.sh $cfg >/dev/null 2>&1" >> /etc/crontabs/root; fi
     fi
 }
 config_load subconv
@@ -222,39 +189,27 @@ config_foreach add_cron subscription
 EOF
 chmod +x /usr/libexec/subconv-cron.sh
 
-echo "4. Создание меню для LuCI..."
 cat << 'EOF' > /usr/share/luci/menu.d/subconv.json
 {
     "admin/services/subconv": {
         "title": "Subconv",
         "order": 90,
-        "action": {
-            "type": "cbi",
-            "path": "subconv"
-        },
-        "depends": {
-            "acl": [ "luci-app-subconv" ]
-        }
+        "action": { "type": "cbi", "path": "subconv" },
+        "depends": { "acl": [ "luci-app-subconv" ] }
     }
 }
 EOF
 
-echo "5. Создание файла прав доступа..."
 cat << 'EOF' > /usr/share/rpcd/acl.d/subconv.json
 {
     "luci-app-subconv": {
         "description": "Grant access to Subconv",
-        "read": {
-            "uci": [ "subconv" ]
-        },
-        "write": {
-            "uci": [ "subconv" ]
-        }
+        "read": { "uci": [ "subconv" ] },
+        "write": { "uci": [ "subconv" ] }
     }
 }
 EOF
 
-echo "6. Создание контроллера LuCI..."
 cat << 'EOF' > /usr/lib/lua/luci/controller/subconv.lua
 module("luci.controller.subconv", package.seeall)
 function index()
@@ -262,7 +217,6 @@ function index()
 end
 EOF
 
-echo "7. Создание интерфейса LuCI..."
 cat << 'EOF' > /usr/lib/lua/luci/model/cbi/subconv.lua
 local uci = require "luci.model.uci".cursor()
 local sys = require "luci.sys"
@@ -302,11 +256,8 @@ if f_hwid_file then
     f_hwid_file:close()
 end
 
--- Генерация случайного HWID (32 символа, как в Happ)
 local random_hwid = sys.exec("cat /proc/sys/kernel/random/uuid 2>/dev/null"):gsub("-", ""):gsub("%s+", "")
-if not random_hwid or random_hwid == "" then 
-    random_hwid = "happ" .. tostring(os.time())
-end
+if not random_hwid or random_hwid == "" then random_hwid = "happ" .. tostring(os.time()) end
 
 sys_os = sys_os:gsub("[\r\n]", "")
 sys_model = sys_model:gsub("[\r\n]", "")
@@ -324,8 +275,7 @@ local f_url = s_add:option(Value, "url", translate("URL подписки"))
 f_url.rmempty = true
 
 local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
-f_ua.description = translate("Влияет на формат выдачи (выберите из списка или введите свой)")
-f_ua:value("SubConv/1.0", "SubConv/1.0 (По умолчанию)")
+f_ua:value("SubConv/1.0", "SubConv/1.0")
 f_ua:value("sing-box/1.9.3", "sing-box 1.9.3")
 f_ua:value("mihomo/1.18.3", "mihomo 1.18.3 (Clash.Meta)")
 f_ua:value("Happ/SC", "Happ/SC")
@@ -335,33 +285,24 @@ f_ua.default = "SubConv/1.0"
 f_ua.rmempty = true
 
 local f_hwid_opt = s_add:option(Value, "hwid", translate("HWID устройства"))
-f_hwid_opt:value(random_hwid, random_hwid .. " (Случайный - По умолчанию)")
+f_hwid_opt:value(random_hwid, random_hwid .. " (Случайный)")
 f_hwid_opt:value(sys_hwid, sys_hwid .. " (Ваш роутер)")
-f_hwid_opt:value("windows-pc-hwid-01", "Windows PC")
-f_hwid_opt:value("macbook-pro-hwid-02", "MacBook Pro")
-f_hwid_opt:value("iphone-15-hwid-03", "iPhone 15")
-f_hwid_opt:value("android-phone-hwid-04", "Android Phone")
 f_hwid_opt.default = random_hwid
 f_hwid_opt.rmempty = true
 
 local f_os = s_add:option(Value, "device_os", translate("OS Устройства"))
-f_os:value(sys_os, sys_os .. " (Ваша ОС)")
+f_os:value(sys_os, sys_os)
 f_os:value("Windows 11", "Windows 11")
-f_os:value("Windows 10", "Windows 10")
-f_os:value("macOS 14.0", "macOS 14.0")
 f_os:value("iOS 17.0", "iOS 17.0")
 f_os:value("Android 14", "Android 14")
-f_os:value("Linux", "Linux")
 f_os.default = sys_os
 f_os.rmempty = true
 
 local f_model = s_add:option(Value, "device_model", translate("Модель Устройства"))
-f_model:value(sys_model, sys_model .. " (Ваша модель)")
+f_model:value(sys_model, sys_model)
 f_model:value("PC", "PC")
-f_model:value("MacBook Pro M2", "MacBook Pro M2")
 f_model:value("iPhone 15 Pro", "iPhone 15 Pro")
-f_model:value("Samsung Galaxy S24", "Samsung Galaxy S24")
-f_model:value("Xiaomi 14", "Xiaomi 14")
+f_model:value("Android Phone", "Android Phone")
 f_model.default = sys_model
 f_model.rmempty = true
 
@@ -388,14 +329,9 @@ function btn_add.write(self, section)
     if new_id and new_id ~= "" and new_url and new_url ~= "" then
         new_id = string.gsub(new_id, "[^%w_]", "_")
         uci:section("subconv", "subscription", new_id, {
-            enabled = "1",
-            url = new_url,
-            user_agent = new_ua,
-            hwid = new_hwid_val,
-            device_os = new_os,
-            device_model = new_model,
-            interval = new_interval,
-            last_type = "Ожидание..."
+            enabled = "1", url = new_url, user_agent = new_ua,
+            hwid = new_hwid_val, device_os = new_os, device_model = new_model,
+            interval = new_interval, last_type = "Ожидание..."
         })
         uci:set("subconv", "add", "sub_id", "")
         uci:set("subconv", "add", "url", "")
@@ -414,21 +350,26 @@ s_list.template = "cbi/tblsection"
 local en = s_list:option(Flag, "enabled", translate("Вкл"))
 en.rmempty = false
 en.default = "1"
-en.enabled = "1"
-en.disabled = "0"
 
-s_list:option(Value, "url", translate("URL")).rmempty = false
+local url_list = s_list:option(Value, "url", translate("URL"))
+url_list.rmempty = false
+url_list.size = "40"
 
 local ua_list = s_list:option(Value, "user_agent", translate("User-Agent"))
+ua_list.size = "12"
 ua_list:value("SubConv/1.0", "SubConv/1.0")
 ua_list:value("sing-box/1.9.3", "sing-box 1.9.3")
 ua_list:value("mihomo/1.18.3", "mihomo 1.18.3")
 ua_list:value("Happ/SC", "Happ/SC")
-ua_list:value("v2rayN/6.42", "v2rayN 6.42")
-ua_list:value("Shadowrocket/1982", "Shadowrocket/1982")
 ua_list.rmempty = false
 
-s_list:option(DummyValue, "hwid", translate("HWID"))
+local hwid_opt = s_list:option(DummyValue, "hwid", translate("HWID"))
+hwid_opt.rawhtml = true
+function hwid_opt.cfgvalue(self, section)
+    local val = uci:get("subconv", section, "hwid") or ""
+    return string.format('<div style="word-break: break-all; min-width: 120px; font-size: 11px; line-height: 1.2;">%s</div>', val)
+end
+
 s_list:option(DummyValue, "device_os", translate("OS"))
 s_list:option(DummyValue, "device_model", translate("Модель"))
 
@@ -451,15 +392,16 @@ function type_opt.cfgvalue(self, section)
     return val
 end
 
-local link_opt = s_list:option(DummyValue, "_link", translate("Локальная ссылка"))
+local link_opt = s_list:option(DummyValue, "_link", translate("Название (ID) и ссылка"))
 link_opt.rawhtml = true
 function link_opt.cfgvalue(self, section)
     local display_url = "http://127.0.0.1/" .. section .. ".txt"
     local href_url = "/" .. section .. ".txt"
-    return string.format('<a href="%s" target="_blank" title="Кликните для просмотра файла">%s</a>', href_url, display_url)
+    return string.format('<div style="line-height: 1.4;"><b>%s</b><br><a href="%s" target="_blank" title="Открыть файл">%s</a></div>', section, href_url, display_url)
 end
 
-local btn_upd_list = s_list:option(Button, "_update", translate("Обновить"))
+local btn_upd_list = s_list:option(Button, "_update", translate(" "))
+btn_upd_list.inputtitle = "🔄"
 btn_upd_list.inputstyle = "apply"
 function btn_upd_list.write(self, section)
     uci:set("subconv", section, "last_type", "Обновление...")
@@ -468,7 +410,8 @@ function btn_upd_list.write(self, section)
     http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
-local btn_del_list = s_list:option(Button, "_delete", translate("Удалить"))
+local btn_del_list = s_list:option(Button, "_delete", translate(" "))
+btn_del_list.inputtitle = "🗑️"
 btn_del_list.inputstyle = "remove"
 function btn_del_list.write(self, section)
     os.execute("rm -f " .. util.shellquote("/www/" .. section .. ".txt"))
@@ -480,9 +423,7 @@ end
 local s_log = m:section(TypedSection, "global", translate("Журнал отладки"))
 s_log.anonymous = true
 s_log.addremove = false
-function s_log.filter(self, section)
-    return section == "add"
-end
+function s_log.filter(self, section) return section == "add" end
 
 local btn_clear = s_log:option(Button, "_clear_log", translate("Очистить лог"))
 btn_clear.inputstyle = "remove"
@@ -495,15 +436,10 @@ local log_view = s_log:option(DummyValue, "_logview")
 log_view.rawhtml = true
 function log_view.cfgvalue(self, section)
     local f = io.open("/www/subconv_debug.txt", "r")
-    local content = f and f:read("*all") or "Лог пуст. Нажмите «Обновить» на любой подписке."
+    local content = f and f:read("*all") or "Лог пуст. Нажмите 🔄 на любой подписке."
     if f then f:close() end
     content = content:gsub("<", "&lt;"):gsub(">", "&gt;")
-    
-    return string.format(
-        '<textarea readonly wrap="off" style="width: 100%%; height: 300px; background: #1a1b26; color: #a9b1d6; font-family: monospace; font-size: 13px; padding: 10px; resize: vertical; border: 1px solid #333; margin-top: 10px;">%s</textarea>' ..
-        '<script>setTimeout(function(){var t=document.getElementsByTagName("textarea");var l=t[t.length-1];if(l){l.scrollTop=l.scrollHeight;}}, 100);</script>', 
-        content
-    )
+    return string.format('<textarea readonly wrap="off" style="width: 100%%; height: 300px; background: #1a1b26; color: #a9b1d6; font-family: monospace; font-size: 13px; padding: 10px; border: 1px solid #333; margin-top: 10px;">%s</textarea><script>setTimeout(function(){var t=document.getElementsByTagName("textarea");var l=t[t.length-1];if(l){l.scrollTop=l.scrollHeight;}}, 100);</script>', content)
 end
 
 function m.on_after_commit(self)
@@ -513,21 +449,12 @@ end
 return m
 EOF
 
-echo "8. Создание конфигурационного файла UCI..."
 if [ ! -f /etc/config/subconv ]; then
-    cat << 'EOF' > /etc/config/subconv
-config global 'add'
-EOF
-else
-    if ! grep -q "config global 'add'" /etc/config/subconv; then
-        echo "config global 'add'" >> /etc/config/subconv
-    fi
+    echo "config global 'add'" > /etc/config/subconv
+elif ! grep -q "config global 'add'" /etc/config/subconv; then
+    echo "config global 'add'" >> /etc/config/subconv
 fi
 
-echo "9. Очистка кэша LuCI..."
 rm -rf /tmp/luci-* /tmp/rpcd-* /tmp/state/*
 /etc/init.d/rpcd restart
-
-echo "=========================================="
-echo "✅ Установка успешно завершена!"
-echo "=========================================="
+echo "✅ Установка завершена!"
