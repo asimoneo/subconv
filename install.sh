@@ -347,9 +347,9 @@ local function get_sys_info()
         local c = f_rel:read("*all")
         f_rel:close()
         for l in c:gmatch("[^\r\n]+") do
-            if l:match("^DISTRIB_ID=") then os_ver = l:match("DISTRIB_ID=['"]?(.-)['"]?$") end
+            if l:match("^DISTRIB_ID=") then os_ver = l:match("DISTRIB_ID=['\"]?(.-)['\"]?$") end
             if l:match("^DISTRIB_RELEASE=") then
-                local rel = l:match("DISTRIB_RELEASE=['"]?(.-)['"]?$")
+                local rel = l:match("DISTRIB_RELEASE=['\"]?(.-)['\"]?$")
                 if rel then os_ver = os_ver .. " " .. rel end
             end
         end
@@ -504,6 +504,7 @@ function f_decrypt.cfgvalue(self, section)
 end
 function f_decrypt.write(self, section)
     -- Скрипт скачивания актуального бинарника дешифратора с GitHub
+    -- ВАЖНО: Мы экранируем $, чтобы переменные bash не интерпретировались во время генерации файла
     local script = [[
         COMMIT_SHA=\$(curl -sSL --connect-timeout 5 https://api.github.com/repos/asimoneo/subconv/commits/main | grep '"sha"' | head -n 1 | awk -F '"' '{print \$4}')
         if [ -n "\$COMMIT_SHA" ]; then
@@ -526,6 +527,7 @@ end
 -- ==========================================
 -- Логика проверки обновлений (версия плагина)
 -- ==========================================
+-- $VERSION не экранируется, так как мы хотим, чтобы bash заменил её во время установки!
 local current_ver = "$VERSION"
 local cache_file = "/tmp/subconv_ver_cache"
 local remote_ver, commit_sha, ts = current_ver, "main", 0
@@ -573,7 +575,7 @@ local title_inj = string.format([[<a href="https://github.com/asimoneo/subconv" 
 local f_js = s_add:option(DummyValue, "_js_tweaks")
 f_js.rawhtml = true
 function f_js.cfgvalue()
-    return string.format(JS_TWEAKS_TEMPLATE, title_inj:gsub("'", "\'"))
+    return string.format(JS_TWEAKS_TEMPLATE, title_inj:gsub("'", "\\'"))
 end
 
 -- Основная кнопка добавления подписки
