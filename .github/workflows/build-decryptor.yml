@@ -1,30 +1,35 @@
 name: Build OpenWrt Decryptor (musl)
 
 on: 
-  workflow_dispatch: # Позволяет запускать сборку вручную по кнопке
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Скачивание исходников дешифратора
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
           repository: amurcanov/happ-decrypt-universal
 
-      - name: Установка Rust
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-musl
 
-      - name: Установка инструмента кросс-компиляции (cross)
-        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.11.0
 
-      - name: Компиляция под aarch64-musl (GL-MT6000)
-        run: cross build --release --target aarch64-unknown-linux-musl
+      - name: Install cargo-zigbuild
+        run: pip3 install cargo-zigbuild
 
-      - name: Сохранение готового файла
+      - name: Compile for aarch64-musl (OpenWrt)
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: happ-decrypt-aarch64-musl
+          name: happ-decrypt
           path: target/aarch64-unknown-linux-musl/release/happ-decrypt-universal
