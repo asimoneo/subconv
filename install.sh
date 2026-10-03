@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="0.3.11"
+VERSION="0.3.12"
 action="${1}"
 
 echo "========================================================="
@@ -62,15 +62,6 @@ mkdir -p /usr/lib/lua/luci/model/cbi
 mkdir -p /usr/lib/lua/luci/controller
 mkdir -p /usr/share/luci/menu.d
 mkdir -p /usr/share/rpcd/acl.d
-
-echo "Загрузка дешифратора..."
-COMMIT_SHA=$(curl -sSL --connect-timeout 5 https://api.github.com/repos/asimoneo/subconv/commits/main | grep '"sha"' | head -n 1 | awk -F '"' '{print $4}')
-if [ -n "$COMMIT_SHA" ]; then
-    curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/${COMMIT_SHA}/happ-decrypt" -o /usr/libexec/happ-decrypt
-else
-    curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt" -o /usr/libexec/happ-decrypt
-fi
-chmod +x /usr/libexec/happ-decrypt
 
 cat << 'EOF' > /usr/libexec/subconv-update.sh
 #!/usr/bin/lua
@@ -399,6 +390,36 @@ f_interval:value("360", translate("Каждые 6 часов"))
 f_interval:value("720", translate("Каждые 12 часов"))
 f_interval:value("1440", translate("Раз в сутки"))
 f_interval.default = "1440"
+
+local f_decrypt = s_add:option(Button, "_dl_decrypt", translate("Дешифратор happ://"))
+f_decrypt.inputtitle = translate("Скачать / Обновить")
+f_decrypt.inputstyle = "apply"
+function f_decrypt.cfgvalue(self, section)
+    if nixio.fs.access("/usr/libexec/happ-decrypt") then
+        self.description = "<span style='color:#4caf50; font-weight:bold;'>✅ Установлен</span> (Нажмите для обновления)"
+    else
+        self.description = "<span style='color:#ff9800; font-weight:bold;'>⚠ Не установлен</span> (Нажмите для загрузки)"
+    end
+end
+function f_decrypt.write(self, section)
+    local script = [[
+        COMMIT_SHA=$(curl -sSL --connect-timeout 5 https://api.github.com/repos/asimoneo/subconv/commits/main | grep '"sha"' | head -n 1 | awk -F '"' '{print $4}')
+        if [ -n "$COMMIT_SHA" ]; then
+            curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/${COMMIT_SHA}/happ-decrypt" -o /usr/libexec/happ-decrypt
+        else
+            curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt" -o /usr/libexec/happ-decrypt
+        fi
+        chmod +x /usr/libexec/happ-decrypt
+    ]]
+    local f = io.open("/tmp/dl_decrypt.sh", "w")
+    if f then
+        f:write(script)
+        f:close()
+        sys.call("sh /tmp/dl_decrypt.sh")
+        os.remove("/tmp/dl_decrypt.sh")
+    end
+    http.redirect(dsp.build_url("admin", "services", "subconv"))
+end
 
 -- Динамическое считывание версии (API GitHub)
 local current_ver = "$VERSION"
