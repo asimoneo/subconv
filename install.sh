@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="0.3.6"
+VERSION="0.3.7"
 action="${1}"
 
 echo "========================================================="
@@ -37,7 +37,6 @@ if [ "$action" = "2" ]; then
     rm -f /usr/share/rpcd/acl.d/subconv.json
     rm -f /etc/config/subconv
     rm -f /www/subconv_debug.txt
-    rm -f /tmp/subconv_ver_cache
     
     if [ -f /etc/crontabs/root ]; then
         sed -i '/subconv-update.sh/d' /etc/crontabs/root
@@ -153,8 +152,6 @@ if url:match("^happ://crypt") or url:match("^v2raytun://crypt") then
         os.exit(1)
     end
     
-    local handle = io.popen(bin_path + " " .. util.shellquote(url) .. " 2>&1")
-    -- исправление синтаксиса конкатенации
     local handle = io.popen(bin_path .. " " .. util.shellquote(url) .. " 2>&1")
     local result = handle and handle:read("*all") or ""
     if handle then handle:close() end
@@ -174,7 +171,7 @@ if url:match("^happ://crypt") or url:match("^v2raytun://crypt") then
     end
 end
 
-log("Запрос: " .. mask_url(url))
+log("Запрос: " .. sub_id)
 log("Заголовки: UA=" .. ua .. " | HWID=" .. hwid .. " | OS=" .. dev_os)
 
 local cmd = string.format("curl -k -L -s -w '%%{http_code}' --connect-timeout 10 --max-time 30 -A %s -H %s -H %s -H %s %s",
@@ -456,7 +453,7 @@ local update_html = ""
 if remote_ver == current_ver then
     update_html = '<span style="color:#4caf50; font-size:12px; margin-left:10px;">✅ актуальная</span>'
 else
-    update_html = string.format('<span style="color:#ff9800; font-size:12px; margin-left:10px;">⚠️️ старая версия, актуальная - %s</span> <button type="submit" name="subconv_self_update" value="1" class="cbi-button cbi-button-apply" style="margin-left:5px; padding:2px 8px; font-size:11px;">Обновить</button>', remote_ver)
+    update_html = string.format('<span style="color:#ff9800; font-size:12px; margin-left:10px;">⚠️ старая версия, актуальная - %s</span> <button type="submit" name="subconv_self_update" value="1" class="cbi-button cbi-button-apply" style="margin-left:5px; padding:2px 8px; font-size:11px;">Обновить</button>', remote_ver)
 end
 
 local title_inj = string.format([[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;">v%s</span> %s]], current_ver, update_html)
