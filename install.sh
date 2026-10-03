@@ -13,7 +13,6 @@ read action
 if [ "$action" = "2" ]; then
     echo "Удаление Subconv..."
     
-    # 1. Читаем конфиг и удаляем все txt файлы, созданные подписками
     if [ -f /etc/config/subconv ]; then
         for sub in $(grep -E "config subscription" /etc/config/subconv | awk -F"'" '{print $2}'); do
             if [ -n "$sub" ]; then
@@ -23,7 +22,6 @@ if [ "$action" = "2" ]; then
         done
     fi
 
-    # 2. Удаляем системные файлы плагина
     rm -f /usr/libexec/subconv-update.sh
     rm -f /usr/libexec/subconv-cron.sh
     rm -f /usr/lib/lua/luci/controller/subconv.lua
@@ -33,13 +31,11 @@ if [ "$action" = "2" ]; then
     rm -f /etc/config/subconv
     rm -f /www/subconv_debug.txt
     
-    # 3. Чистим Cron
     if [ -f /etc/crontabs/root ]; then
         sed -i '/subconv-update.sh/d' /etc/crontabs/root
         /etc/init.d/cron restart
     fi
     
-    # 4. Очищаем кэш
     rm -rf /tmp/luci-* /tmp/rpcd-* /tmp/state/*
     /etc/init.d/rpcd restart
     
@@ -79,7 +75,6 @@ local function log(msg)
     end
 end
 
--- Функция для обновления статуса в интерфейсе в реальном времени
 local function save_status(msg)
     local u = require "luci.model.uci".cursor()
     u:set("subconv", sub_id, "last_type", msg)
@@ -170,7 +165,7 @@ if f_dbg then f_dbg:close() end
 EOF
 chmod +x /usr/libexec/subconv-update.sh
 
-echo "3. Создание скрипта Cron (со стабильными интервалами)..."
+echo "3. Создание скрипта Cron..."
 cat << 'EOF' > /usr/libexec/subconv-cron.sh
 #!/bin/sh
 . /lib/functions.sh
@@ -204,7 +199,7 @@ config_foreach add_cron subscription
 EOF
 chmod +x /usr/libexec/subconv-cron.sh
 
-echo "4. Создание меню для LuCI (/usr/share/luci/menu.d/subconv.json)..."
+echo "4. Создание меню для LuCI..."
 cat << 'EOF' > /usr/share/luci/menu.d/subconv.json
 {
     "admin/services/subconv": {
@@ -221,7 +216,7 @@ cat << 'EOF' > /usr/share/luci/menu.d/subconv.json
 }
 EOF
 
-echo "5. Создание файла прав доступа rpcd (/usr/share/rpcd/acl.d/subconv.json)..."
+echo "5. Создание файла прав доступа..."
 cat << 'EOF' > /usr/share/rpcd/acl.d/subconv.json
 {
     "luci-app-subconv": {
@@ -236,7 +231,7 @@ cat << 'EOF' > /usr/share/rpcd/acl.d/subconv.json
 }
 EOF
 
-echo "6. Создание классического контроллера LuCI (/usr/lib/lua/luci/controller/subconv.lua)..."
+echo "6. Создание контроллера LuCI..."
 cat << 'EOF' > /usr/lib/lua/luci/controller/subconv.lua
 module("luci.controller.subconv", package.seeall)
 function index()
@@ -244,7 +239,7 @@ function index()
 end
 EOF
 
-echo "7. Создание интерфейса LuCI (/usr/lib/lua/luci/model/cbi/subconv.lua)..."
+echo "7. Создание интерфейса LuCI..."
 cat << 'EOF' > /usr/lib/lua/luci/model/cbi/subconv.lua
 local uci = require "luci.model.uci".cursor()
 local sys = require "luci.sys"
@@ -277,11 +272,11 @@ if f_mod then
 end
 
 local sys_hwid = "openwrt-router-default"
-local f_hwid = io.open("/etc/machine-id", "r")
-if f_hwid then
-    local hw = f_hwid:read("*all"):gsub("^%s+", ""):gsub("%s+$", "")
+local f_hwid_file = io.open("/etc/machine-id", "r")
+if f_hwid_file then
+    local hw = f_hwid_file:read("*all"):gsub("^%s+", ""):gsub("%s+$", "")
     if hw ~= "" then sys_hwid = hw end
-    f_hwid:close()
+    f_hwid_file:close()
 end
 
 local s_add = m:section(NamedSection, "add", "global", translate("Добавить новую подписку"))
@@ -296,7 +291,7 @@ local f_url = s_add:option(Value, "url", translate("URL подписки"))
 f_url.rmempty = true
 
 local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
-f_ua.description = translate("Определяет формат выдачи сервером (выберите из списка или введите свой вручную)")
+f_ua.description = translate("Влияет на формат выдачи (выберите из списка или введите свой)")
 f_ua:value("SubConv/1.0", "SubConv/1.0 (По умолчанию)")
 f_ua:value("sing-box/1.9.3", "sing-box 1.9.3")
 f_ua:value("mihomo/1.18.3", "mihomo 1.18.3 (Clash.Meta)")
@@ -306,6 +301,36 @@ f_ua:value("Shadowrocket/1982", "Shadowrocket/1982")
 f_ua.default = "SubConv/1.0"
 f_ua.rmempty = true
 
+local f_hwid_opt = s_add:option(Value, "hwid", translate("HWID устройства"))
+f_hwid_opt:value(sys_hwid, sys_hwid .. " (Ваш роутер)")
+f_hwid_opt:value("windows-pc-hwid-01", "Windows PC")
+f_hwid_opt:value("macbook-pro-hwid-02", "MacBook Pro")
+f_hwid_opt:value("iphone-15-hwid-03", "iPhone 15")
+f_hwid_opt:value("android-phone-hwid-04", "Android Phone")
+f_hwid_opt.default = sys_hwid
+f_hwid_opt.rmempty = true
+
+local f_os = s_add:option(Value, "device_os", translate("OS Устройства"))
+f_os:value(sys_os, sys_os .. " (Ваша ОС)")
+f_os:value("Windows 11", "Windows 11")
+f_os:value("Windows 10", "Windows 10")
+f_os:value("macOS 14.0", "macOS 14.0")
+f_os:value("iOS 17.0", "iOS 17.0")
+f_os:value("Android 14", "Android 14")
+f_os:value("Linux", "Linux")
+f_os.default = sys_os
+f_os.rmempty = true
+
+local f_model = s_add:option(Value, "device_model", translate("Модель Устройства"))
+f_model:value(sys_model, sys_model .. " (Ваша модель)")
+f_model:value("PC", "PC")
+f_model:value("MacBook Pro M2", "MacBook Pro M2")
+f_model:value("iPhone 15 Pro", "iPhone 15 Pro")
+f_model:value("Samsung Galaxy S24", "Samsung Galaxy S24")
+f_model:value("Xiaomi 14", "Xiaomi 14")
+f_model.default = sys_model
+f_model.rmempty = true
+
 local f_interval = s_add:option(ListValue, "interval", translate("Интервал обновления"))
 f_interval:value("0", translate("Отключено"))
 f_interval:value("30", translate("Каждые 30 мин"))
@@ -314,18 +339,6 @@ f_interval:value("360", translate("Каждые 6 часов"))
 f_interval:value("720", translate("Каждые 12 часов"))
 f_interval:value("1440", translate("Раз в сутки"))
 f_interval.default = "1440"
-
-local f_hwid_opt = s_add:option(Value, "hwid", translate("HWID устройства"))
-f_hwid_opt.default = sys_hwid
-f_hwid_opt.rmempty = true
-
-local f_os = s_add:option(Value, "device_os", translate("OS Устройства"))
-f_os.default = sys_os
-f_os.rmempty = true
-
-local f_model = s_add:option(Value, "device_model", translate("Модель Устройства"))
-f_model.default = sys_model
-f_model.rmempty = true
 
 local btn_add = s_add:option(Button, "_add", translate("Добавить подписку"))
 btn_add.inputstyle = "add"
@@ -382,6 +395,10 @@ ua_list:value("v2rayN/6.42", "v2rayN 6.42")
 ua_list:value("Shadowrocket/1982", "Shadowrocket/1982")
 ua_list.rmempty = false
 
+s_list:option(DummyValue, "hwid", translate("HWID"))
+s_list:option(DummyValue, "device_os", translate("OS"))
+s_list:option(DummyValue, "device_model", translate("Модель"))
+
 local interval_list = s_list:option(ListValue, "interval", translate("Обновление"))
 interval_list:value("0", translate("Откл"))
 interval_list:value("30", translate("30 мин"))
@@ -391,7 +408,6 @@ interval_list:value("720", translate("12 часов"))
 interval_list:value("1440", translate("24 часа"))
 interval_list.rmempty = false
 
--- Статус скачивания с авто-обновлением страницы каждые 3 секунды, пока висит "Ожидание" или "Обновление"
 local type_opt = s_list:option(DummyValue, "last_type", translate("Тип выдачи"))
 type_opt.rawhtml = true
 function type_opt.cfgvalue(self, section)
@@ -435,7 +451,7 @@ end
 return m
 EOF
 
-echo "8. Создание конфигурационного файла UCI (/etc/config/subconv)..."
+echo "8. Создание конфигурационного файла UCI..."
 if [ ! -f /etc/config/subconv ]; then
     cat << 'EOF' > /etc/config/subconv
 config global 'add'
