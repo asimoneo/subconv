@@ -1,16 +1,21 @@
 #!/bin/sh
 
-VERSION="0.3.1"
+VERSION="0.3.2"
+action="${1}"
 
 echo "========================================================="
 echo "        Установка Subconv v$VERSION                      "
 echo "========================================================="
-echo "Выберите действие:"
-echo " 1) Установить / Обновить плагин"
-echo " 2) Полностью УДАЛИТЬ плагин и все его файлы"
-echo "========================================================="
-printf "Ваш выбор [1]: "
-read action
+
+if [ -z "$action" ]; then
+    echo "Выберите действие:"
+    echo " 1) Установить / Обновить плагин"
+    echo " 2) Полностью УДАЛИТЬ плагин и все его файлы"
+    echo "========================================================="
+    printf "Ваш выбор [1]: "
+    read action
+    action=${action:-1}
+fi
 
 if [ "$action" = "2" ]; then
     echo "Удаление Subconv..."
@@ -99,41 +104,17 @@ local out_path = "/www/" .. sub_id .. ".txt"
 
 if url:match("^happ://crypt") or url:match("^v2raytun://crypt") then
     log("Обнаружена крипто-ссылка. Запуск локальной дешифровки...")
-    local arch = sys.exec("uname -m") or ""
-    arch = arch:gsub("%s+", "")
     local bin_path = "/usr/libexec/happ-decrypt"
     
-    local need_dl = true
-    local f_bin = io.open(bin_path, "r")
-    if f_bin then
-        local size = f_bin:seek("end")
-        f_bin:close()
-        if size and size > 50000 then 
-            need_dl = false 
-        end
+    if not nixio.fs.access(bin_path) then
+        log("ОШИБКА: Нативный дешифратор не установлен. Загрузите его через интерфейс плагина.")
+        save_status("Нет дешифратора")
+        os.exit(1)
     end
     
-    if need_dl then
-        log("Скачивание нативного дешифратора amurcanov для архитектуры: " .. arch)
-        local dl_cmd = ""
-        if arch:match("aarch64") or arch:match("armv8") then
-            dl_cmd = "curl -sL --connect-timeout 10 --max-time 60 https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/android-arm64-v8a -o " .. bin_path
-        elseif arch:match("x86_64") then
-            dl_cmd = "curl -sL --connect-timeout 10 --max-time 60 https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/linux-x64_x86 -o " .. bin_path
-        elseif arch:match("arm") then
-            dl_cmd = "curl -sL --connect-timeout 10 --max-time 60 https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/android-armeabi-v7a -o " .. bin_path
-        else
-            log("ОШИБКА: Архитектура " .. arch .. " не поддерживается бинарниками.")
-            save_status("Ошибка архитектуры")
-            os.exit(1)
-        end
-        os.execute(dl_cmd)
-    end
-    
-    os.execute("chmod +x " .. bin_path)
     log("Запуск бинарника: " .. bin_path)
-    
-    local handle = io.popen("timeout 10 " .. bin_path .. " " .. util.shellquote(url) .. " 2>&1")
+    -- Удалена команда timeout, так как она отсутствует в некоторых прошивках
+    local handle = io.popen(bin_path .. " " .. util.shellquote(url) .. " 2>&1")
     local result = handle and handle:read("*all") or ""
     if handle then handle:close() end
     
@@ -408,12 +389,60 @@ local f_decrypt = s_add:option(DummyValue, "_decrypt", translate("Дешифра
 f_decrypt.description = translate("Нативный модуль для расшифровки протокола crypt5.")
 f_decrypt.rawhtml = true
 function f_decrypt.cfgvalue()
-    local status = "<span style='color:#ff9800;'>Ожидает загрузки (Latest)</span>"
-    if nixio.fs.access("/usr/libexec/happ-decrypt") then
-        status = "<span style='color:#4caf50;'>Установлен (Latest)</span>"
+    local inst_ver = uci:get("subconv", "add", "decrypter_ver") or ""
+    local has_bin = nixio.fs.access("/usr/libexec/happ-decrypt")
+    if not has_bin then inst_ver = "" end
+
+    local out = ""
+    if inst_ver == "" then
+        out = "<span style='color:#ff9800;'>Не установлен</span> &nbsp; " .. [[<button type="submit" name="happ_install" value="1" class="cbi-button cbi-button-apply">Установить</button>]]
+    else
+        out = "<span style='color:#4caf50;'>Установлена версия " .. inst_ver .. "</span> &nbsp; "
+        out = out .. [[<button type="submit" name="happ_check" value="1" class="cbi-button">Проверить обновления</button>]]
+        
+        local avail = uci:get("subconv", "add", "decrypter_avail") or ""
+        if avail ~= "" and avail ~= inst_ver then
+            out = out .. " &nbsp; <b><span style='color:#ff9800;'>(Актуальная: " .. avail .. ")</span></b> &nbsp; " .. [[<button type="submit" name="happ_install" value="1" class="cbi-button cbi-button-apply">Обновить</button>]]
+        end
     end
-    return string.format('<b>%s</b> | <a href="https://github.com/amurcanov/happ-decrypt-universal" target="_blank" style="text-decoration:underline;">amurcanov/happ-decrypt-universal</a>', status)
+    return out
 end
+
+-- Логика проверки самообновления (кеширование на 10 сек)
+local current_ver = "0.3.2"
+local cache_file = "/tmp/subconv_ver_cache"
+local remote_ver = current_ver
+local ts = 0
+local f = io.open(cache_file, "r")
+if f then
+    local content = f:read("*a")
+    f:close()
+    local pts, pver = content:match("^(%d+)|(.*)$")
+    if pts then ts = tonumber(pts); remote_ver = pver:gsub("%s+", "") end
+end
+
+if os.time() - ts > 10 then
+    local h = io.popen("curl -sL --connect-timeout 3 --max-time 5 https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/install.sh | grep '^VERSION=' | head -n 1")
+    if h then
+        local res = h:read("*a")
+        h:close()
+        local fetched = res:match('VERSION="(.-)"')
+        if fetched then
+            remote_ver = fetched:gsub("%s+", "")
+            local fw = io.open(cache_file, "w")
+            if fw then fw:write(os.time() .. "|" .. remote_ver); fw:close() end
+        end
+    end
+end
+
+local update_html = ""
+if remote_ver == current_ver then
+    update_html = '<span style="color:#4caf50; font-size:12px; margin-left:10px;">✅ Актуальная</span>'
+else
+    update_html = string.format('<span style="color:#ff9800; font-size:12px; margin-left:10px;">⚠️ Старая версия, актуальная - %s</span> <button type="submit" name="subconv_self_update" value="1" class="cbi-button cbi-button-apply" style="margin-left:5px; padding:2px 8px; font-size:11px;">Обновить</button>', remote_ver)
+end
+
+local title_inj = string.format([[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;">v%s</span> %s]], current_ver, update_html)
 
 local f_js = s_add:option(DummyValue, "_js_tweaks")
 f_js.rawhtml = true
@@ -437,7 +466,7 @@ function f_js.cfgvalue()
                 
                 var title = document.querySelector('h2');
                 if(title && title.innerText.includes('Subconv')) {
-                    title.innerHTML = '<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;">v0.3.1</span>';
+                    title.innerHTML = ']] .. title_inj:gsub("'", "\\'") .. [[';
                 }
             }, 100);
         </script>
@@ -602,12 +631,63 @@ function m.on_after_commit(self)
     sys.call("/usr/libexec/subconv-cron.sh")
 end
 
+-- Обработчики скрытых форм
 if http.formvalue("update_all") == "1" then
     uci:foreach("subconv", "subscription", function(s)
         uci:set("subconv", s['.name'], "last_type", "Обновление...")
         sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(s['.name']) .. " >/dev/null 2>&1 &")
     end)
     uci:commit("subconv")
+    http.redirect(dsp.build_url("admin", "services", "subconv"))
+end
+
+if http.formvalue("happ_check") == "1" then
+    local h = io.popen("curl -sL --connect-timeout 5 https://api.github.com/repos/amurcanov/happ-decrypt-universal/releases/latest | grep '\"tag_name\":' | head -n 1")
+    if h then
+        local res = h:read("*a")
+        h:close()
+        local tag = res:match('"tag_name":%s*"v?([^"]+)"')
+        if tag then
+            uci:set("subconv", "add", "decrypter_avail", tag)
+            uci:commit("subconv")
+        end
+    end
+    http.redirect(dsp.build_url("admin", "services", "subconv"))
+end
+
+if http.formvalue("happ_install") == "1" then
+    local tag = "unknown"
+    local h = io.popen("curl -sL --connect-timeout 5 https://api.github.com/repos/amurcanov/happ-decrypt-universal/releases/latest | grep '\"tag_name\":' | head -n 1")
+    if h then
+        local res = h:read("*a")
+        h:close()
+        local fetched = res:match('"tag_name":%s*"v?([^"]+)"')
+        if fetched then tag = fetched end
+    end
+    
+    local arch = sys.exec("uname -m") or ""
+    arch = arch:gsub("%s+", "")
+    local dl_url = ""
+    if arch:match("aarch64") or arch:match("armv8") then
+        dl_url = "https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/android-arm64-v8a"
+    elseif arch:match("x86_64") then
+        dl_url = "https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/linux-x64_x86"
+    elseif arch:match("arm") then
+        dl_url = "https://github.com/amurcanov/happ-decrypt-universal/releases/latest/download/android-armeabi-v7a"
+    end
+    
+    if dl_url ~= "" then
+        os.execute("curl -sL --connect-timeout 10 --max-time 60 " .. dl_url .. " -o /usr/libexec/happ-decrypt")
+        os.execute("chmod +x /usr/libexec/happ-decrypt")
+        uci:set("subconv", "add", "decrypter_ver", tag)
+        uci:set("subconv", "add", "decrypter_avail", tag)
+        uci:commit("subconv")
+    end
+    http.redirect(dsp.build_url("admin", "services", "subconv"))
+end
+
+if http.formvalue("subconv_self_update") == "1" then
+    sys.call("curl -sSL https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/install.sh | sh -s 1 >/dev/null 2>&1 &")
     http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
