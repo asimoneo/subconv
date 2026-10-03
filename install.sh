@@ -1,7 +1,7 @@
 #!/bin/sh
 
 echo "========================================================="
-echo "        Установка Subconv                                "
+echo "        Установка Subconv (Проверка ID + Описания)       "
 echo "========================================================="
 echo "Выберите действие:"
 echo " 1) Установить / Обновить плагин"
@@ -288,13 +288,15 @@ s_add.addremove = false
 s_add.anonymous = true
 
 local f_id = s_add:option(Value, "sub_id", translate("Имя подписки (ID)"))
-f_id.description = translate("Только латиница. Имя файла будет совпадать ({ID}.txt).")
+f_id.description = translate("Только латиница без пробелов. Задает имя выходного файла ({ID}.txt).")
 f_id.rmempty = true
 
 local f_url = s_add:option(Value, "url", translate("URL подписки"))
+f_url.description = translate("Прямая ссылка от провайдера (поддерживаются URI, YAML и JSON форматы).")
 f_url.rmempty = true
 
 local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
+f_ua.description = translate("Маскировка клиента. Некоторые провайдеры отдают узлы только под определенные UA.")
 f_ua:value("SubConv/1.0", "SubConv/1.0 (По умолчанию)")
 f_ua:value("sing-box/1.9.3", "sing-box 1.9.3")
 f_ua:value("mihomo/1.18.3", "mihomo 1.18.3 (Clash.Meta)")
@@ -305,12 +307,14 @@ f_ua.default = "SubConv/1.0"
 f_ua.rmempty = true
 
 local f_hwid_opt = s_add:option(Value, "hwid", translate("HWID устройства"))
+f_hwid_opt.description = translate("Уникальный идентификатор. Защищает от блокировки при мультиаккаунтах.")
 f_hwid_opt:value(random_hwid, random_hwid .. " (Случайный - По умолчанию)")
 f_hwid_opt:value(sys_hwid, sys_hwid .. " (Ваш роутер)")
 f_hwid_opt.default = random_hwid
 f_hwid_opt.rmempty = true
 
 local f_os = s_add:option(Value, "device_os", translate("OS Устройства"))
+f_os.description = translate("Система, которая будет указана в заголовках запроса.")
 f_os:value(sys_os, sys_os)
 f_os:value("Windows 11", "Windows 11")
 f_os:value("iOS 17.0", "iOS 17.0")
@@ -319,6 +323,7 @@ f_os.default = sys_os
 f_os.rmempty = true
 
 local f_model = s_add:option(Value, "device_model", translate("Модель Устройства"))
+f_model.description = translate("Название устройства для передачи провайдеру.")
 f_model:value(sys_model, sys_model)
 f_model:value("PC", "PC")
 f_model:value("iPhone 15 Pro", "iPhone 15 Pro")
@@ -327,6 +332,7 @@ f_model.default = sys_model
 f_model.rmempty = true
 
 local f_interval = s_add:option(ListValue, "interval", translate("Интервал обновления"))
+f_interval.description = translate("Как часто роутер будет автоматически скачивать свежие узлы (Cron).")
 f_interval:value("0", translate("Отключено"))
 f_interval:value("30", translate("Каждые 30 мин"))
 f_interval:value("60", translate("Каждый 1 час"))
@@ -334,6 +340,30 @@ f_interval:value("360", translate("Каждые 6 часов"))
 f_interval:value("720", translate("Каждые 12 часов"))
 f_interval:value("1440", translate("Раз в сутки"))
 f_interval.default = "1440"
+
+local f_js = s_add:option(DummyValue, "_js_tweaks")
+f_js.rawhtml = true
+function f_js.cfgvalue()
+    return [[
+        <script>
+            setTimeout(function() {
+                document.querySelectorAll('#cbi-subconv-add .cbi-value').forEach(function(el) {
+                    var field = el.querySelector('.cbi-value-field');
+                    var desc = el.querySelector('.cbi-value-description');
+                    if (field && desc) {
+                        field.style.display = 'flex';
+                        field.style.alignItems = 'center';
+                        field.style.gap = '15px';
+                        field.appendChild(desc);
+                        desc.style.margin = '0';
+                        desc.style.opacity = '0.8';
+                        desc.style.fontSize = '12px';
+                    }
+                });
+            }, 100);
+        </script>
+    ]]
+end
 
 local btn_add = s_add:option(Button, "_add", translate("Добавить подписку"))
 btn_add.inputstyle = "add"
@@ -348,6 +378,12 @@ function btn_add.write(self, section)
 
     if new_id and new_id ~= "" and new_url and new_url ~= "" then
         new_id = string.gsub(new_id, "[^%w_]", "_")
+        
+        if uci:get("subconv", new_id) then
+            m.message = "Ошибка: Подписка с именем '" .. new_id .. "' уже существует!"
+            return
+        end
+
         uci:section("subconv", "subscription", new_id, {
             enabled = "1", url = new_url, user_agent = new_ua,
             hwid = new_hwid_val, device_os = new_os, device_model = new_model,
