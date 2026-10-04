@@ -250,13 +250,19 @@ func Decrypt(value string) (string, error) {
 }
 
 func main() {
-	input, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error reading stdin: %v\n", err)
-		os.Exit(1)
+	var lines []string
+	if len(os.Args) > 1 {
+		lines = []string{os.Args[1]}
+	} else {
+		input, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading stdin: %v\n", err)
+			os.Exit(1)
+		}
+		lines = strings.Split(string(input), "\n")
 	}
 
-	lines := strings.Split(string(input), "\n")
+	
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -267,7 +273,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Base64 Error: %v\n", err)
 			fmt.Println(line)
 		} else {
-			fmt.Println(decrypted)
+			fmt.Println("Result\n" + decrypted)
 		}
 	}
 }
