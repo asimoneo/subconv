@@ -249,7 +249,14 @@ func Decrypt(value string) (string, error) {
 	return decryptRSA(payload, mode)
 }
 
+const DecryptorVersion = "v0.3.14-go1"
+
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "-v" || os.Args[1] == "--version") {
+		fmt.Println(DecryptorVersion)
+		return
+	}
+
 	var lines []string
 	if len(os.Args) > 1 {
 		lines = []string{os.Args[1]}
