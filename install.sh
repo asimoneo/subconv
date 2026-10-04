@@ -396,8 +396,6 @@ local sys_os, sys_model, sys_hwid, random_hwid = get_sys_info()
 -- Константы для HTML и JavaScript
 -- (Вынесены отдельно, чтобы не засорять логику Lua)
 -- ==========================================
-local HTML_DECRYPT_OK = "<span style='color:#4caf50; font-weight:bold;'>✅ Расшифрован</span> (файл успешно сохранен)"
-local HTML_DECRYPT_WARN = "<span style='color:#ff9800; font-weight:bold;'>⚠️ Не расшифрован</span> (сохранен как есть)"
 local current_ver = "$VERSION"
 
 local title_html = string.format([[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;" id="plugin-ver-text">v%s</span> <button type="button" class="cbi-button" style="margin-left: 10px; font-size: 12px; padding: 2px 6px;" id="btn-check-ver" onclick="checkPluginVersion()">Проверить версию</button><button type="button" class="cbi-button cbi-button-apply" style="margin-left: 5px; font-size: 12px; padding: 2px 6px; display: none;" id="btn-do-update" onclick="doPluginUpdate()">Обновить</button>]], current_ver)
@@ -554,8 +552,15 @@ local f_decrypt = s_add:option(Button, "_dl_decrypt", translate("Дешифра�
 f_decrypt.inputtitle = translate("Скачать / Обновить")
 f_decrypt.inputstyle = "apply"
 function f_decrypt.cfgvalue(self, section)
-    -- Меняем описание кнопки в зависимости от того, есть ли бинарник в системе
-    self.description = nixio.fs.access("/usr/libexec/happ-decrypt") and HTML_DECRYPT_OK or HTML_DECRYPT_WARN
+    local bin_path = "/usr/libexec/happ-decrypt"
+    if nixio.fs.access(bin_path) then
+        local v_handle = io.popen(bin_path .. " --version 2>/dev/null")
+        local bin_ver = v_handle and v_handle:read("*l") or "unknown"
+        if v_handle then v_handle:close() end
+        self.description = "<span style='color:#4caf50; font-weight:bold;'>✅ Установлен (" .. bin_ver .. ")</span>"
+    else
+        self.description = "<span style='color:#ff9800; font-weight:bold;'>⚠️ Не установлен</span> (Нажмите для загрузки)"
+    end
 end
 function f_decrypt.write(self, section)
     -- Скрипт скачивания актуального бинарника дешифратора с GitHub
