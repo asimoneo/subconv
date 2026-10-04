@@ -1,6 +1,6 @@
 #!/bin/sh
 
-VERSION="0.3.14"
+VERSION="0.3.15"
 action="${1}"
 
 echo "========================================================="
@@ -119,8 +119,17 @@ end
 
 -- Дешифровка проприетарных ссылок happ://crypt с помощью локального Go-бинарника
 local function decrypt_happ_url(url)
-    log("Обнаружена крипто-ссылка. Запуск локальной дешифровки (Бинарник)...")
     local bin_path = "/usr/libexec/happ-decrypt"
+    local bin_ver = "unknown"
+    if nixio.fs.access(bin_path) then
+        local v_handle = io.popen(bin_path .. " --version 2>/dev/null")
+        if v_handle then
+            bin_ver = v_handle:read("*l") or "unknown"
+            v_handle:close()
+        end
+    end
+    log("Обнаружена крипто-ссылка. Дешифратор: " .. bin_ver .. "...")
+
     
     if not nixio.fs.access(bin_path) then
         exit_with_error("Бинарник дешифратора не найден.", "Нет дешифратора")
