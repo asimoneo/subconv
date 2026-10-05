@@ -39,6 +39,7 @@ if [ "$action" = "2" ]; then
     rm -f /etc/config/subconv
     rm -f /www/subconv_debug.txt
     rm -f /tmp/subconv_ver_cache
+    rm -f /tmp/subconv_status.json
     
     if [ -f /etc/crontabs/root ]; then
         sed -i '/subconv-update.sh/d' /etc/crontabs/root
@@ -110,11 +111,30 @@ local function exit_with_error(msg, status_msg)
     os.exit(1)
 end
 
--- Функция маскировки URL для безопасности логов (скрывает вторую половину токенов)
-local function mask_url(u)
-    if not u then return "" end
-    local v_len = math.min(math.floor(#u / 2), 35)
-    return u:sub(1, v_len) .. "••••••••"
+-- Функция маскировки URL (стандарт токенов GitHub / AWS, аналогично таблице)
+local function mask_url(val)
+    if not val or val == "" then return "" end
+    if #val <= 18 then return val end
+    local tail = val:sub(-4)
+    local body = val:sub(1, -5)
+    local scheme_domain, path = body:match("^([%a%d%+%.%-]+://[^/]+)(/?.*)$")
+    local prefix = ""
+    local max_prefix = 27
+    if scheme_domain then
+        if #scheme_domain > max_prefix then
+            prefix = scheme_domain:sub(1, max_prefix)
+        else
+            local avail = max_prefix - #scheme_domain
+            if path and avail > 2 then
+                prefix = scheme_domain .. path:sub(1, avail)
+            else
+                prefix = scheme_domain .. "/"
+            end
+        end
+    else
+        prefix = body:sub(1, max_prefix)
+    end
+    return prefix .. "••••" .. tail
 end
 
 -- Дешифровка проприетарных ссылок happ://crypt с помощью локального Go-бинарника
@@ -128,7 +148,7 @@ local function decrypt_happ_url(url)
             v_handle:close()
         end
     end
-    log("Обнаружена крипто-ссылка. Дешифратор: " .. bin_ver .. "...")
+    log("Обнаружена крипто-ссылка: " .. mask_url(url) .. ". Дешифратор: " .. bin_ver .. "...")
 
     if not nixio.fs.access(bin_path) then
         exit_with_error("Бинарник дешифратора не найден.", "Нет дешифратора")
@@ -217,8 +237,9 @@ if url:match("^happ://") or url:match("^v2raytun://") then
     url = decrypt_happ_url(url)
 end
 
-log("Запрос: " .. sub_id)
+log("Запрос: " .. sub_id .. " (" .. mask_url(url) .. ")")
 log("Заголовки: UA=" .. ua .. " | HWID=" .. hwid .. " | OS=" .. dev_os)
+log("Отправка запроса к серверу...")
 
 -- 3. Выполняем запрос к серверу провайдера
 local hdr_file = "/tmp/sub_headers_" .. (sub_id or "tmp") .. ".tmp"
@@ -298,24 +319,37 @@ chmod +x /usr/libexec/subconv-update.sh
 
 cat << 'EOF' > /usr/libexec/subconv-cron.sh
 #!/bin/sh
-. /lib/functions.sh
-touch /etc/crontabs/root
-sed -i '/subconv-update.sh/d' /etc/crontabs/root
+# =====================================================================
+# Скрипт синхронизации расписания Cron для подписок
+# =====================================================================
+# Этот скрипт вызывается LuCI при сохранении настроек подписок.
+# Он читает параметр interval для каждой подписки и создает записи в /etc/crontabs/root.
 
+. /lib/functions.sh
+
+# Удаляем все старые задачи subconv из crontabs
+if [ -f /etc/crontabs/root ]; then
+    sed -i '/subconv-update.sh/d' /etc/crontabs/root
+fi
+
+# Функция добавления задачи для конкретной подписки
 add_cron() {
     local cfg="$1"
     local interval
-    config_get interval "$cfg" interval 1440
+    config_get interval "$cfg" interval "1440"
     
-    if [ "$interval" -gt 0 ]; then
+    # 0 = Отключено
+    if [ "$interval" != "0" ]; then
         local cron_expr=""
         case "$interval" in
-            30) cron_expr="*/30 * * * *" ;;
-            60) cron_expr="0 * * * *" ;;
-            360) cron_expr="0 */6 * * *" ;;
-            720) cron_expr="0 */12 * * *" ;;
-            1440) cron_expr="0 4 * * *" ;;
+            "30")   cron_expr="*/30 * * * *" ;;
+            "60")   cron_expr="0 * * * *" ;;
+            "360")  cron_expr="0 */6 * * *" ;;
+            "720")  cron_expr="0 */12 * * *" ;;
+            "1440") cron_expr="0 4 * * *" ;;
+            *)      cron_expr="0 4 * * *" ;;
         esac
+        
         if [ -n "$cron_expr" ]; then echo "$cron_expr /usr/libexec/subconv-update.sh $cfg >/dev/null 2>&1" >> /etc/crontabs/root; fi
     fi
 }
@@ -350,6 +384,47 @@ cat << 'EOF' > /usr/lib/lua/luci/controller/subconv.lua
 module("luci.controller.subconv", package.seeall)
 function index()
     entry({"admin", "services", "subconv"}, cbi("subconv"), _("Subconv"), 90).dependent = true
+    entry({"admin", "services", "subconv", "status"}, call("action_status")).leaf = true
+end
+
+function action_status()
+    local nixio = require "nixio"
+    local http = require "luci.http"
+    local cache_file = "/tmp/subconv_status.json"
+
+    -- Серверная защита от DDoS / флуда: отдаем кэш из /tmp при повторных запросах чаще 1 сек
+    local st = nixio.fs.stat(cache_file)
+    if st and (os.time() - st.mtime < 1) then
+        local cf = io.open(cache_file, "r")
+        if cf then
+            local cached = cf:read("*all")
+            cf:close()
+            if cached and #cached > 0 then
+                http.prepare_content("application/json")
+                http.write(cached)
+                return
+            end
+        end
+    end
+
+    local uci = require "luci.model.uci".cursor()
+    local items = {}
+    uci:foreach("subconv", "subscription", function(s)
+        local id = s[".name"]
+        local lt = (s.last_type or ""):gsub('"', '\\"')
+        local ui = (s.userinfo or ""):gsub('"', '\\"')
+        table.insert(items, string.format('"%s":{"last_type":"%s","userinfo":"%s"}', id, lt, ui))
+    end)
+    local json_str = "{" .. table.concat(items, ",") .. "}"
+
+    local cf = io.open(cache_file, "w")
+    if cf then
+        cf:write(json_str)
+        cf:close()
+    end
+
+    http.prepare_content("application/json")
+    http.write(json_str)
 end
 EOF
 
@@ -421,6 +496,7 @@ local sys_os, sys_model, sys_hwid, random_hwid = get_sys_info()
 local current_ver = "0.3.16"
 
 local title_html = string.format([[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;" id="plugin-ver-text">v%s</span> <button type="button" class="cbi-button" style="margin-left: 10px; font-size: 12px; padding: 2px 6px;" id="btn-check-ver" onclick="checkPluginVersion()">Проверить обновления</button><button type="button" class="cbi-button cbi-button-apply" style="margin-left: 5px; font-size: 12px; padding: 2px 6px; display: none;" id="btn-do-update" onclick="doPluginUpdate()">Обновить</button>]], current_ver)
+
 
 local CSS_TWEAKS = [===[<style>
   /* 1. Выделение и плавная анимация (0.8с) раскрытия формы добавления */
@@ -657,6 +733,15 @@ local CSS_TWEAKS = [===[<style>
     15% { opacity: 1; transform: translate(-50%, 0) scale(1); }
     75% { opacity: 1; transform: translate(-50%, -2px) scale(1); }
     100% { opacity: 0; transform: translate(-50%, -10px) scale(0.9); }
+  }
+
+  .subconv-spin {
+    display: inline-block !important;
+    animation: subconvSpin 1s linear infinite !important;
+  }
+  @keyframes subconvSpin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 
   /* Кол 2 (User-Agent): ширина 120px, видимые стрелки и всплывающее меню поверх таблицы */
@@ -1059,15 +1144,104 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
         }
     }
 
+    // Защищенный опрос статуса обновления без зацикливания и DDoS
+    function initStatusWatcher() {
+        var targets = document.querySelectorAll('.subconv-status-updating');
+        if (!targets.length) return;
+        if (window.__subconv_watcher_running) return;
+        window.__subconv_watcher_running = true;
+
+        var attempts = 0;
+        var maxAttempts = 15; // 35-40 секунд максимум
+        var isRequestPending = false;
+        var retryDelay = 2500;
+
+        function stopWatcher(reason) {
+            window.__subconv_watcher_running = false;
+            if (reason === 'timeout') {
+                document.querySelectorAll('.subconv-status-updating').forEach(function(el) {
+                    el.innerHTML = '<span style="color:#d97706; font-size:12px; font-weight:500;">⚠️ Таймаут</span> <a href="" onclick="location.reload();return false;" style="margin-left:3px; font-size:11px; text-decoration:underline; color:#2563eb;">[обновить]</a>';
+                });
+            }
+        }
+
+        function poll() {
+            if (!window.__subconv_watcher_running) return;
+
+            // Если вкладка скрыта/не активна, не спамим запросами к роутеру
+            if (document.hidden) {
+                setTimeout(poll, 3000);
+                return;
+            }
+
+            attempts++;
+            if (attempts > maxAttempts) {
+                stopWatcher('timeout');
+                return;
+            }
+
+            // Защита от наложения запросов (anti-pileup)
+            if (isRequestPending) {
+                setTimeout(poll, 1500);
+                return;
+            }
+
+            isRequestPending = true;
+            var statusUrl = window.location.pathname.replace(/\/+$/, '') + '/status';
+
+            fetch(statusUrl, { cache: 'no-store' })
+                .then(function(res) {
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    return res.json();
+                })
+                .then(function(data) {
+                    isRequestPending = false;
+                    retryDelay = 2500;
+                    var stillUpdating = false;
+
+                    document.querySelectorAll('.subconv-status-updating').forEach(function(el) {
+                        var sub = el.getAttribute('data-sub');
+                        if (data && data[sub]) {
+                            var st = data[sub].last_type;
+                            if (st && st !== 'Обновление...') {
+                                el.innerHTML = st;
+                                el.classList.remove('subconv-status-updating');
+                            } else {
+                                stillUpdating = true;
+                            }
+                        }
+                    });
+
+                    if (!document.querySelectorAll('.subconv-status-updating').length) {
+                        stopWatcher('done');
+                        setTimeout(function() { location.reload(); }, 600);
+                    } else {
+                        setTimeout(poll, retryDelay);
+                    }
+                })
+                .catch(function() {
+                    isRequestPending = false;
+                    retryDelay = Math.min(retryDelay * 1.5, 6000);
+                    setTimeout(poll, retryDelay);
+                });
+        }
+
+        setTimeout(poll, 1500);
+    }
+
     setTimeout(function() {
         var title = document.querySelector('h2');
         if(title && title.innerText.includes('Subconv')) {
             title.innerHTML = '%s';
         }
         alignFormAndTable();
+        initStatusWatcher();
     }, 50);
 
-    setTimeout(alignFormAndTable, 200);
+    setTimeout(function() {
+        alignFormAndTable();
+        initStatusWatcher();
+    }, 200);
     setTimeout(alignFormAndTable, 600);
 </script>
 <button type="submit" name="subconv_self_update" value="1" id="subconv_self_update_btn" style="display:none;"></button>]===]
@@ -1311,8 +1485,8 @@ local type_opt = s_list:option(DummyValue, "last_type", translate("Тип выд
 type_opt.rawhtml = true
 function type_opt.cfgvalue(self, section)
     local val = uci:get("subconv", section, "last_type") or "Ожидание..."
-    if val == "Ожидание..." or val == "Обновление..." then
-        return val .. ' <script>setTimeout(function(){location.reload();}, 3000);</script>'
+    if val == "Обновление..." then
+        return string.format('<span class="subconv-status-updating" data-sub="%s" style="display:inline-flex; align-items:center; gap:4px; font-weight:500; color:#2563eb;"><span class="subconv-spin">🔄</span> Обновление...</span>', section)
     end
     return val
 end
