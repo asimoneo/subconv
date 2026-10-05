@@ -103,220 +103,274 @@ local function save_status(msg)
     u:commit("subconv")
 end
 
--- Централизованный обработчик ошибок (пишет в лог, обновляет статус и завершает работу)
-local function exit_with_error(msg, status_msg)
-    log("ОШИБКА: " .. msg)
-    if status_msg then save_status(status_msg) end
+-- Проверка наличия ID подписки
+if not sub_id then
+    log("Ошибка: ID подписки не указан при вызове скрипта.")
     os.exit(1)
 end
 
--- Функция маскировки URL для безопасности логов (скрывает вторую половину токенов)
-local function mask_url(u)
-    if not u then return "" end
-    local v_len = math.min(math.floor(#u / 2), 35)
-    return u:sub(1, v_len) .. "••••••••"
-end
-
--- Дешифровка проприетарных ссылок happ://crypt с помощью локального Go-бинарника
-local function decrypt_happ_url(url)
-    local bin_path = "/usr/libexec/happ-decrypt"
-    local bin_ver = "unknown"
-    if nixio.fs.access(bin_path) then
-        local v_handle = io.popen(bin_path .. " --version 2>/dev/null")
-        if v_handle then
-            bin_ver = v_handle:read("*l") or "unknown"
-            v_handle:close()
-        end
-    end
-    log("Обнаружена крипто-ссылка. Дешифратор: " .. bin_ver .. "...")
-
-    
-    if not nixio.fs.access(bin_path) then
-        exit_with_error("Бинарник дешифратора не найден.", "Нет дешифратора")
-    end
-    
-    -- Вызов бинарника с передачей зашифрованного URL
-    local handle = io.popen(bin_path .. " " .. util.shellquote(url) .. " 2>&1")
-    local result = handle and handle:read("*all") or ""
-    if handle then handle:close() end
-    
-    -- Парсинг результата (ищем прямую ссылку)
-    local decrypted = result:match("Result\r?\n(https?://%S+)") or result:match("Result\r?\n(%S+)")
-    
-    if decrypted and decrypted:match("^http") then
-        log("Успешно расшифровано! Истинный URL: " .. mask_url(decrypted))
-        return decrypted
-    else
-        exit_with_error("Сбой дешифровки: " .. tostring(result):sub(1, 150), "Сбой дешифровки")
-    end
-end
-
--- Загрузка списка узлов с сервера провайдера с подменой заголовков (User-Agent, HWID)
-local function parse_userinfo(hdr_file)
-    local f = io.open(hdr_file, "r")
-    if not f then return nil end
-    local content = f:read("*all")
-    f:close()
-    os.remove(hdr_file)
-    if not content or content == "" then return nil end
-    local uinfo_line = content:lower():match("subscription%-userinfo%s*:[^%c]+")
-    if not uinfo_line then return nil end
-    local upload = tonumber(uinfo_line:match("upload=(%d+)")) or 0
-    local download = tonumber(uinfo_line:match("download=(%d+)")) or 0
-    local total = tonumber(uinfo_line:match("total=(%d+)")) or 0
-    local expire = tonumber(uinfo_line:match("expire=(%d+)")) or 0
-    return string.format("%.0f|%.0f|%.0f", upload + download, total, expire)
-end
-
-local function fetch_subscription(url, ua, hwid, dev_os, dev_model, hdr_file)
-    local cmd = string.format("curl -k -L -s -D %s -w '%%{http_code}' --connect-timeout 10 --max-time 30 -A %s -H %s -H %s -H %s %s",
-        util.shellquote(hdr_file),
-        util.shellquote(ua),
-        util.shellquote("X-HWID: " .. hwid),
-        util.shellquote("X-DEVICE-OS: " .. dev_os),
-        util.shellquote("X-DEVICE-MODEL: " .. dev_model),
-        util.shellquote(url)
-    )
-    local handle = io.popen(cmd)
-    local resp_raw = handle and handle:read("*all") or ""
-    if handle then handle:close() end
-    return resp_raw
-end
-
-local function write_to_file(path, content_data)
-    local f_out = io.open(path, "w")
-    if f_out then
-        f_out:write(content_data)
-        f_out:close()
-        return true
-    end
-    return false
-end
-
--- ==========================================
--- Главный процесс
--- ==========================================
-
-log("=== СТАРТ ОБНОВЛЕНИЯ ===")
-if not sub_id then os.exit(1) end
-
--- 1. Считывание настроек подписки из конфигурации роутера (UCI)
-uci:load("subconv")
+-- Чтение параметров подписки из /etc/config/subconv
 local url = uci:get("subconv", sub_id, "url")
-if not url or url == "" then
-    exit_with_error("нет URL", "Ошибка: нет URL")
-end
-
 local ua = uci:get("subconv", sub_id, "user_agent") or "SubConv/1.0"
-local hwid = uci:get("subconv", sub_id, "hwid") or "openwrt-router-default"
-local dev_os = uci:get("subconv", sub_id, "device_os") or "OpenWrt"
-local dev_model = uci:get("subconv", sub_id, "device_model") or "OpenWrt Router"
-local out_path = "/www/" .. sub_id .. ".txt"
+local hwid = uci:get("subconv", sub_id, "hwid")
+local dev_os = uci:get("subconv", sub_id, "device_os")
+local dev_model = uci:get("subconv", sub_id, "device_model")
 
--- 2. Если ссылка проприетарная, расшифровываем ее перед загрузкой
-if url:match("^happ://crypt") or url:match("^v2raytun://crypt") then
-    url = decrypt_happ_url(url)
+log("Начало обновления подписки. User-Agent: " .. ua)
+
+if not url or url == "" then
+    save_status("Ошибка: Пустой URL")
+    log("Ошибка: URL пустой в конфигурации.")
+    os.exit(1)
 end
 
-log("Запрос: " .. sub_id)
-log("Заголовки: UA=" .. ua .. " | HWID=" .. hwid .. " | OS=" .. dev_os)
+-- ==========================================
+-- Обработка протоколов happ://crypt
+-- ==========================================
+-- Если ссылка начинается с happ://, нам нужно скачать зашифрованные данные
+-- и передать их внешнему бинарнику happ-decrypt (Go) для расшифровки AES/RC4.
+if url:match("^happ://") then
+    log("Обнаружена happ:// ссылка. Подготовка к расшифровке...")
+    
+    -- Превращаем happ://crypt5/xxx в https://crypt5/xxx для скачивания по HTTP/HTTPS
+    local http_url = url:gsub("^happ://", "https://")
+    local raw_file = "/tmp/happ_raw_" .. sub_id .. ".bin"
+    local dec_file = "/tmp/happ_dec_" .. sub_id .. ".txt"
 
--- 3. Выполняем запрос к серверу провайдера
-local hdr_file = "/tmp/sub_headers_" .. (sub_id or "tmp") .. ".tmp"
-local resp_raw = fetch_subscription(url, ua, hwid, dev_os, dev_model, hdr_file)
-local uinfo_str = parse_userinfo(hdr_file)
-if uinfo_str and sub_id then
-    uci:set("subconv", sub_id, "userinfo", uinfo_str)
-    uci:commit("subconv")
-    log("Тариф (структура): " .. uinfo_str)
-end
-if not resp_raw or #resp_raw < 3 then
-    exit_with_error("Сервер не ответил (сбой сети или таймаут)", "Ошибка сети")
-end
-
--- Отделяем HTTP-код состояния (последние 3 символа из вывода curl) от тела ответа
-local http_code = resp_raw:sub(-3)
-local resp = resp_raw:sub(1, -4)
-
-log("HTTP Код: " .. tostring(http_code))
-
-if #resp == 0 then
-    exit_with_error("Пустое тело ответа", "Ошибка (HTTP " .. http_code .. "/Пусто)")
-end
-
--- 4. Определение формата полученных данных (Base64 / Текст / JSON / YAML)
-local decoded = resp
-local is_b64 = false
-
--- Пробуем декодировать ответ из Base64
-local b64_dec = nixio.bin.b64decode(resp)
-if b64_dec and (b64_dec:match("://") or b64_dec:match("^%s*{") or b64_dec:match("^%s*%[") or b64_dec:match("proxies:") or b64_dec:match("^happ://")) then
-    decoded = b64_dec
-    is_b64 = true
-    log("Декодирован Base64")
-end
-
--- Проверяем, является ли ответ "сырым" массивом конфигурации (JSON/YAML)
-local is_raw = decoded:match("^%s*{") or decoded:match("^%s*%[") or decoded:match("proxies:")
-
--- 5. Сохранение полученных узлов в локальный файл для HomeProxy
-if is_raw then
-    -- Сохраняем сырой конфиг как есть (HomeProxy сам разберется с JSON/YAML, если поддерживает)
-    if write_to_file(out_path, decoded) then
-        log("УСПЕХ: Сохранен как сырой конфиг (JSON/YAML)")
-        save_status("JSON/YAML Конфиг")
-    else
-        exit_with_error("Не удалось записать файл " .. out_path, "Ошибка записи")
+    -- Формируем команду curl со всеми необходимыми заголовками устройства
+    local headers = string.format("-H %s", util.shellquote("User-Agent: " .. ua))
+    if hwid and hwid ~= "" then
+        headers = headers .. string.format(" -H %s", util.shellquote("device-hwid: " .. hwid))
     end
-else
-    -- Парсим обычный текстовый список URI (vless://, vmess://)
-    local links = {}
-    for line in decoded:gmatch("[^\r\n]+") do
-        -- Убираем пробелы по краям
-        line = line:match("^%s*(.-)%s*$")
-        -- Если строка похожа на рабочую ссылку — добавляем в массив
-        if line and (line:match("://") or line:match("^happ://")) then 
-            table.insert(links, line) 
+    if dev_os and dev_os ~= "" then
+        headers = headers .. string.format(" -H %s", util.shellquote("device-os: " .. dev_os))
+    end
+    if dev_model and dev_model ~= "" then
+        headers = headers .. string.format(" -H %s", util.shellquote("device-model: " .. dev_model))
+    end
+
+    local cmd = string.format("curl -s -L -k --connect-timeout 15 -m 30 %s %s -o %s -D /tmp/happ_hdr_%s.txt",
+        headers, util.shellquote(http_url), util.shellquote(raw_file), sub_id)
+    
+    log("Выполнение запроса: " .. cmd)
+    local ret = sys.call(cmd)
+
+    -- Читаем Userinfo из заголовков HTTP-ответа (трафик, дата окончания)
+    local h_file = io.open("/tmp/happ_hdr_" .. sub_id .. ".txt", "r")
+    if h_file then
+        local h_data = h_file:read("*all")
+        h_file:close()
+        os.remove("/tmp/happ_hdr_" .. sub_id .. ".txt")
+        
+        local userinfo = h_data:match("subscription%-userinfo:%s*([^\r\n]+)")
+        if not userinfo then
+            userinfo = h_data:match("Subscription%-Userinfo:%s*([^\r\n]+)")
+        end
+        if userinfo then
+            local u = tonumber(userinfo:match("upload=(%d+)")) or 0
+            local d = tonumber(userinfo:match("download=(%d+)")) or 0
+            local total = tonumber(userinfo:match("total=(%d+)")) or 0
+            local expire = tonumber(userinfo:match("expire=(%d+)")) or 0
+            
+            local u_cursor = require "luci.model.uci".cursor()
+            u_cursor:set("subconv", sub_id, "userinfo", string.format("%d|%d|%d", (u + d), total, expire))
+            u_cursor:commit("subconv")
+            log(string.format("Сохранен Userinfo: использовано %d, всего %d, истекает %d", (u + d), total, expire))
         end
     end
 
-    -- Если ссылки найдены, сохраняем их в файл, доступный встроенному веб-серверу (uhttpd)
-    if #links > 0 then
-        if write_to_file(out_path, table.concat(links, "\n") .. "\n") then
-            log("УСПЕХ: Найдено " .. #links .. " узлов URI")
-            save_status(is_b64 and ("Base64 (" .. #links .. ")") or ("Текст (" .. #links .. ")"))
+    if ret ~= 0 then
+        save_status("Ошибка: сбой скачивания")
+        log("Ошибка скачивания happ:// файла, код возврата curl: " .. tostring(ret))
+        os.exit(1)
+    end
+
+    -- Вызов Go-дешифратора happ-decrypt
+    local dec_bin = "/usr/libexec/happ-decrypt"
+    if nixio.fs.access(dec_bin) then
+        local dec_cmd = string.format("%s -u %s -i %s -o %s", 
+            util.shellquote(dec_bin), util.shellquote(url), util.shellquote(raw_file), util.shellquote(dec_file))
+        log("Вызов Go-дешифратора: " .. dec_cmd)
+        local d_ret = sys.call(dec_cmd)
+        os.remove(raw_file)
+        
+        if d_ret ~= 0 or not nixio.fs.access(dec_file) then
+            save_status("Ошибка: сбой дешифратора")
+            log("Дешифратор вернул ошибку: " .. tostring(d_ret))
+            os.exit(1)
+        end
+    else
+        save_status("Ошибка: нет дешифратора")
+        log("Дешифратор не найден в /usr/libexec/happ-decrypt!")
+        os.remove(raw_file)
+        os.exit(1)
+    end
+
+    -- Читаем расшифрованные данные
+    local f_dec = io.open(dec_file, "r")
+    if not f_dec then
+        save_status("Ошибка чтения расшифровки")
+        log("Не удалось открыть файл расшифровки: " .. dec_file)
+        os.exit(1)
+    end
+    local content = f_dec:read("*all")
+    f_dec:close()
+    os.remove(dec_file)
+
+    -- Если результат валиден, сохраняем его в /www/{ID}.txt
+    if content and #content > 0 then
+        local out_f = io.open("/www/" .. sub_id .. ".txt", "w")
+        if out_f then
+            out_f:write(content)
+            out_f:close()
+            save_status("happ-decrypt (OK)")
+            log("Успешно сохранено " .. #content .. " байт в /www/" .. sub_id .. ".txt")
+            os.exit(0)
         else
-            exit_with_error("Не удалось записать файл " .. out_path, "Ошибка записи")
+            save_status("Ошибка записи /www")
+            log("Ошибка открытия на запись файла /www/" .. sub_id .. ".txt")
+            os.exit(1)
         end
     else
-        -- Если ничего не нашли, логируем начало мусорного ответа
-        local snippet = decoded:sub(1, 50):gsub("[%c\n\r]", " ")
-        exit_with_error("Узлы не найдены. Начало ответа: " .. snippet, "Пусто (Нет узлов)")
+        save_status("Ошибка: Пустой вывод")
+        log("Ошибка: Дешифратор выдал 0 байт.")
+        os.exit(1)
     end
+end
+
+-- ==========================================
+-- Обработка обычных ссылок (HTTP/HTTPS)
+-- ==========================================
+-- Скачиваем содержимое по прямой ссылке
+local raw_file = "/tmp/raw_" .. sub_id .. ".txt"
+local headers = string.format("-H %s", util.shellquote("User-Agent: " .. ua))
+if hwid and hwid ~= "" then headers = headers .. string.format(" -H %s", util.shellquote("device-hwid: " .. hwid)) end
+if dev_os and dev_os ~= "" then headers = headers .. string.format(" -H %s", util.shellquote("device-os: " .. dev_os)) end
+if dev_model and dev_model ~= "" then headers = headers .. string.format(" -H %s", util.shellquote("device-model: " .. dev_model)) end
+
+local cmd = string.format("curl -s -L -k --connect-timeout 15 -m 30 %s %s -o %s -D /tmp/hdr_%s.txt",
+    headers, util.shellquote(url), util.shellquote(raw_file), sub_id)
+
+log("Выполнение curl: " .. cmd)
+local ret = sys.call(cmd)
+
+-- Считываем Userinfo из заголовков HTTP-ответа
+local h_file = io.open("/tmp/hdr_" .. sub_id .. ".txt", "r")
+if h_file then
+    local h_data = h_file:read("*all")
+    h_file:close()
+    os.remove("/tmp/hdr_" .. sub_id .. ".txt")
+    
+    local userinfo = h_data:match("subscription%-userinfo:%s*([^\r\n]+)")
+    if not userinfo then
+        userinfo = h_data:match("Subscription%-Userinfo:%s*([^\r\n]+)")
+    end
+    if userinfo then
+        local u = tonumber(userinfo:match("upload=(%d+)")) or 0
+        local d = tonumber(userinfo:match("download=(%d+)")) or 0
+        local total = tonumber(userinfo:match("total=(%d+)")) or 0
+        local expire = tonumber(userinfo:match("expire=(%d+)")) or 0
+        
+        local u_cursor = require "luci.model.uci".cursor()
+        u_cursor:set("subconv", sub_id, "userinfo", string.format("%d|%d|%d", (u + d), total, expire))
+        u_cursor:commit("subconv")
+        log(string.format("Сохранен Userinfo: использовано %d, всего %d, истекает %d", (u + d), total, expire))
+    end
+end
+
+if ret ~= 0 then
+    save_status("Ошибка: сбой скачивания")
+    log("Ошибка скачивания по curl, код ошибки: " .. tostring(ret))
+    os.exit(1)
+end
+
+local f_raw = io.open(raw_file, "r")
+if not f_raw then
+    save_status("Ошибка: нет файла")
+    log("Не удалось прочитать скачанный файл: " .. raw_file)
+    os.exit(1)
+end
+local content = f_raw:read("*all")
+f_raw:close()
+os.remove(raw_file)
+
+if not content or #content == 0 then
+    save_status("Ошибка: пустой ответ")
+    log("Сервер вернул пустой ответ (0 байт).")
+    os.exit(1)
+end
+
+-- ==========================================
+-- Анализ типа контента (Base64, JSON, YAML, URI)
+-- ==========================================
+local detected_type = "Неизвестный"
+local clean_content = content:gsub("^%s+", ""):gsub("%s+$", "")
+
+-- 1. Проверка на Base64
+local b64_test = nixio.bin.b64decode(clean_content)
+if b64_test and (b64_test:match("vless://") or b64_test:match("vmess://") or b64_test:match("ss://") or b64_test:match("trojan://")) then
+    detected_type = "Base64 (URI)"
+    content = b64_test
+-- 2. Проверка на JSON
+elseif clean_content:sub(1,1) == "{" or clean_content:sub(1,1) == "[" then
+    detected_type = "JSON"
+-- 3. Проверка на YAML / Clash Config
+elseif clean_content:match("proxies:") or clean_content:match("port:") then
+    detected_type = "YAML (Clash)"
+-- 4. Обычные прямые ссылки (URI)
+elseif clean_content:match("vless://") or clean_content:match("vmess://") or clean_content:match("ss://") or clean_content:match("trojan://") then
+    detected_type = "Plain (URI)"
+end
+
+-- Сохраняем итоговый результат
+local out_f = io.open("/www/" .. sub_id .. ".txt", "w")
+if out_f then
+    out_f:write(content)
+    out_f:close()
+    save_status(detected_type .. " (OK)")
+    log("Успешно сохранено " .. #content .. " байт (" .. detected_type .. ") в /www/" .. sub_id .. ".txt")
+    os.exit(0)
+else
+    save_status("Ошибка записи /www")
+    log("Ошибка открытия файла /www/" .. sub_id .. ".txt на запись")
+    os.exit(1)
 end
 EOF
 chmod +x /usr/libexec/subconv-update.sh
 
 cat << 'EOF' > /usr/libexec/subconv-cron.sh
 #!/bin/sh
-. /lib/functions.sh
-touch /etc/crontabs/root
-sed -i '/subconv-update.sh/d' /etc/crontabs/root
+# =====================================================================
+# Скрипт синхронизации расписания Cron для подписок
+# =====================================================================
+# Этот скрипт вызывается LuCI при сохранении настроек подписок.
+# Он читает параметр interval для каждой подписки и создает записи в /etc/crontabs/root.
 
+. /lib/functions.sh
+
+# Удаляем все старые задачи subconv из crontabs
+if [ -f /etc/crontabs/root ]; then
+    sed -i '/subconv-update.sh/d' /etc/crontabs/root
+fi
+
+# Функция добавления задачи для конкретной подписки
 add_cron() {
     local cfg="$1"
     local interval
-    config_get interval "$cfg" interval 1440
+    config_get interval "$cfg" interval "1440"
     
-    if [ "$interval" -gt 0 ]; then
+    # 0 = Отключено
+    if [ "$interval" != "0" ]; then
         local cron_expr=""
         case "$interval" in
-            30) cron_expr="*/30 * * * *" ;;
-            60) cron_expr="0 * * * *" ;;
-            360) cron_expr="0 */6 * * *" ;;
-            720) cron_expr="0 */12 * * *" ;;
-            1440) cron_expr="0 4 * * *" ;;
+            "30")   cron_expr="*/30 * * * *" ;;
+            "60")   cron_expr="0 * * * *" ;;
+            "360")  cron_expr="0 */6 * * *" ;;
+            "720")  cron_expr="0 */12 * * *" ;;
+            "1440") cron_expr="0 4 * * *" ;;
+            *)      cron_expr="0 4 * * *" ;;
         esac
+        
         if [ -n "$cron_expr" ]; then echo "$cron_expr /usr/libexec/subconv-update.sh $cfg >/dev/null 2>&1" >> /etc/crontabs/root; fi
     fi
 }
@@ -1160,23 +1214,13 @@ function f_decrypt.cfgvalue(self, section)
     end
 end
 function f_decrypt.write(self, section)
-    -- Скрипт скачивания актуального бинарника дешифратора с GitHub
-    local script = [[
-        COMMIT_SHA=$(curl -sSL --connect-timeout 5 https://api.github.com/repos/asimoneo/subconv/commits/main | grep '"sha"' | head -n 1 | awk -F '"' '{print $4}')
-        if [ -n "$COMMIT_SHA" ]; then
-            curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/${COMMIT_SHA}/happ-decrypt" -o /usr/libexec/happ-decrypt
-        else
-            curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt" -o /usr/libexec/happ-decrypt
-        fi
-        chmod +x /usr/libexec/happ-decrypt
-    ]]
-    local f = io.open("/tmp/dl_decrypt.sh", "w")
-    if f then
-        f:write(script)
-        f:close()
-        sys.call("sh /tmp/dl_decrypt.sh")
-        os.remove("/tmp/dl_decrypt.sh")
-    end
+    local cmd = "COMMIT_SHA=$(curl -sSL --connect-timeout 5 https://api.github.com/repos/asimoneo/subconv/commits/main 2>/dev/null | grep '\"sha\"' | head -n 1 | awk -F '\"' '{print $4}'); " ..
+                "if [ -n \"$COMMIT_SHA\" ]; then " ..
+                "curl -fsSL \"https://raw.githubusercontent.com/asimoneo/subconv/${COMMIT_SHA}/happ-decrypt\" -o /usr/libexec/happ-decrypt; " ..
+                "else " ..
+                "curl -fsSL \"https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt\" -o /usr/libexec/happ-decrypt; " ..
+                "fi; chmod +x /usr/libexec/happ-decrypt"
+    sys.call(cmd)
     http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
@@ -1184,7 +1228,7 @@ end
 local f_js = s_add:option(DummyValue, "_js_tweaks")
 f_js.rawhtml = true
 function f_js.cfgvalue()
-    return string.format(JS_TWEAKS_TEMPLATE, current_ver, title_html:gsub("'", "\\'"))
+    return CSS_TWEAKS .. string.format(JS_TWEAKS_TEMPLATE, current_ver, title_html:gsub("'", "\\'"))
 end
 
 -- Основная кнопка добавления подписки
@@ -1234,8 +1278,6 @@ local s_list = m:section(TypedSection, "subscription", list_title)
 s_list.anonymous = true
 s_list.addremove = false
 s_list.template = "cbi/tblsection"
-
--- Отображение URL (с маскировкой длинных ссылок для безопасности)
 
 -- Отображение URL (стандарт токенов GitHub / AWS с лимитом длины до 2 строк)
 local url_list = s_list:option(DummyValue, "url", translate("URL"))
