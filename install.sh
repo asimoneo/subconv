@@ -102,6 +102,7 @@ local function save_status(msg)
     local u = require "luci.model.uci".cursor()
     u:set("subconv", sub_id, "last_type", msg)
     u:commit("subconv")
+    os.remove("/tmp/subconv_status.json")
 end
 
 -- Централизованный обработчик ошибок (пишет в лог, обновляет статус и завершает работу)
@@ -385,6 +386,73 @@ module("luci.controller.subconv", package.seeall)
 function index()
     entry({"admin", "services", "subconv"}, cbi("subconv"), _("Subconv"), 90).dependent = true
     entry({"admin", "services", "subconv", "status"}, call("action_status")).leaf = true
+    entry({"admin", "services", "subconv", "update_ajax"}, call("action_update_ajax")).leaf = true
+end
+
+local function format_sub_info(id, uinfo)
+    local l2, l3 = "", ""
+    if uinfo and uinfo ~= "" then
+        local used, total, exp = uinfo:match("^(%d+)|(%d+)|(%d+)$")
+        if used and total and exp then
+            used, total, exp = tonumber(used), tonumber(total), tonumber(exp)
+            local function fmt_b(b)
+                if b >= 1073741824 then return string.format("%.1f ГБ", b / 1073741824)
+                elseif b >= 1048576 then return string.format("%.1f МБ", b / 1048576)
+                else return string.format("%.1f КБ", b / 1024) end
+            end
+            local has_exp = (exp and exp > 0)
+            local exp_date = has_exp and os.date("%d.%m.%Y", exp) or "бессрочно"
+            local now = os.time()
+            local is_expired = has_exp and (exp < now)
+            local days_left = has_exp and math.max(0, math.floor((exp - now) / 86400)) or nil
+
+            local d_str = nil
+            if has_exp then
+                local ld, lt = days_left % 10, days_left % 100
+                if lt >= 11 and lt <= 19 then d_str = days_left .. " дней"
+                elseif ld == 1 then d_str = days_left .. " день"
+                elseif ld >= 2 and ld <= 4 then d_str = days_left .. " дня"
+                else d_str = days_left .. " дней" end
+            end
+
+            local inf_icon = [[<span style="font-size: 20px; font-weight: bold; line-height: 1; vertical-align: -2px; margin-right: 4px; display: inline-block;">∞</span>]]
+
+            if total > 0 then
+                local left_b = math.max(0, total - used)
+                l2 = string.format([[<div style="font-size: 11px; opacity: 0.9; margin-top: 2px; white-space: nowrap;">%s / %s до %s</div>]], fmt_b(used), fmt_b(total), exp_date)
+                if is_expired then
+                    l3 = [[<div style="font-size: 11px; color: #ff5555; font-weight: bold; margin-top: 1px; white-space: nowrap;">Срок истёк</div>]]
+                elseif left_b <= 0 then
+                    l3 = [[<div style="font-size: 11px; color: #ff5555; font-weight: bold; margin-top: 1px; white-space: nowrap;">Трафик исчерпан</div>]]
+                elseif has_exp then
+                    if days_left == 0 then
+                        l3 = string.format([[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Осталось: %s (истекает сегодня)</div>]], fmt_b(left_b))
+                    else
+                        l3 = string.format([[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Осталось: %s на %s</div>]], fmt_b(left_b), d_str)
+                    end
+                else
+                    l3 = string.format([[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Осталось: %s</div>]], fmt_b(left_b))
+                end
+            else
+                if has_exp then
+                    l2 = string.format([[<div style="font-size: 11px; opacity: 0.9; margin-top: 2px; white-space: nowrap;">%sдо %s</div>]], inf_icon, exp_date)
+                    if is_expired then
+                        l3 = [[<div style="font-size: 11px; color: #ff5555; font-weight: bold; margin-top: 1px; white-space: nowrap;">Срок истёк</div>]]
+                    elseif days_left == 0 then
+                        l3 = [[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Истекает сегодня</div>]]
+                    else
+                        l3 = string.format([[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Осталось: %s</div>]], d_str)
+                    end
+                else
+                    l2 = string.format([[<div style="font-size: 11px; opacity: 0.9; margin-top: 2px; white-space: nowrap;">%sбез ограничений</div>]], inf_icon)
+                    l3 = [[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Бессрочно</div>]]
+                end
+            end
+        end
+    else
+        l2 = [[<div style="font-size: 11px; opacity: 0.5; margin-top: 2px; white-space: nowrap;">(нет данных)</div>]]
+    end
+    return string.format([[<div style="line-height: 1.3; white-space: nowrap;"><div style="font-size: 13px; font-weight: bold;">%s</div>%s%s</div>]], id, l2, l3)
 end
 
 function action_status()
@@ -413,7 +481,8 @@ function action_status()
         local id = s[".name"]
         local lt = (s.last_type or ""):gsub('"', '\\"')
         local ui = (s.userinfo or ""):gsub('"', '\\"')
-        table.insert(items, string.format('"%s":{"last_type":"%s","userinfo":"%s"}', id, lt, ui))
+        local info_h = format_sub_info(id, s.userinfo):gsub('"', '\\"'):gsub('\r?\n', '')
+        table.insert(items, string.format('"%s":{"last_type":"%s","userinfo":"%s","info_html":"%s"}', id, lt, ui, info_h))
     end)
     local json_str = "{" .. table.concat(items, ",") .. "}"
 
@@ -425,6 +494,42 @@ function action_status()
 
     http.prepare_content("application/json")
     http.write(json_str)
+end
+
+function action_update_ajax()
+    local http = require "luci.http"
+    local uci = require "luci.model.uci".cursor()
+    local util = require "luci.util"
+    local sys = require "luci.sys"
+
+    local sub = http.formvalue("sub")
+    local update_all = http.formvalue("all")
+
+    os.remove("/tmp/subconv_status.json")
+
+    if update_all == "1" then
+        uci:foreach("subconv", "subscription", function(s)
+            local id = s[".name"]
+            uci:set("subconv", id, "last_type", "Обновление...")
+            sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(id) .. " >/dev/null 2>&1 &")
+        end)
+        uci:commit("subconv")
+        http.prepare_content("application/json")
+        http.write('{"status":"ok","all":true}')
+        return
+    end
+
+    if sub and sub ~= "" then
+        uci:set("subconv", sub, "last_type", "Обновление...")
+        uci:commit("subconv")
+        sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(sub) .. " >/dev/null 2>&1 &")
+        http.prepare_content("application/json")
+        http.write('{"status":"ok","sub":"' .. sub .. '"}')
+        return
+    end
+
+    http.prepare_content("application/json")
+    http.write('{"status":"error","message":"no target"}')
 end
 EOF
 
@@ -1144,23 +1249,79 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
         }
     }
 
-    // Защищенный опрос статуса обновления без зацикливания и DDoS
+    // Запуск AJAX обновления одной подписки
+    function triggerSubUpdate(btn, subId) {
+        if (!subId) return;
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<span class="subconv-spin">🔄</span>';
+        }
+
+        var statusEl = document.querySelector('.subconv-status-cell[data-sub="' + subId + '"]');
+        if (statusEl) {
+            statusEl.innerHTML = '<span class="subconv-status-updating" data-sub="' + subId + '" style="display:inline-flex; align-items:center; gap:4px; font-weight:500; color:#2563eb;"><span class="subconv-spin">🔄</span> Обновление...</span>';
+        }
+
+        var url = window.location.pathname.replace(/\/+$/, '') + '/update_ajax?sub=' + encodeURIComponent(subId);
+        fetch(url, { cache: 'no-store' })
+            .catch(function(e) { console.error('Update trigger error', e); });
+
+        initStatusWatcher();
+    }
+
+    // Запуск AJAX обновления всех подписок
+    function triggerUpdateAll(btn) {
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<span class="subconv-spin">🔄</span> Обновление...';
+        }
+
+        document.querySelectorAll('button[onclick*="triggerSubUpdate"]').forEach(function(b) {
+            var m = b.getAttribute('onclick').match(/triggerSubUpdate\(this,\s*'([^']+)'\)/);
+            if (m && m[1]) {
+                var sId = m[1];
+                b.disabled = true;
+                b.innerHTML = '<span class="subconv-spin">🔄</span>';
+                var sEl = document.querySelector('.subconv-status-cell[data-sub="' + sId + '"]');
+                if (sEl) {
+                    sEl.innerHTML = '<span class="subconv-status-updating" data-sub="' + sId + '" style="display:inline-flex; align-items:center; gap:4px; font-weight:500; color:#2563eb;"><span class="subconv-spin">🔄</span> Обновление...</span>';
+                }
+            }
+        });
+
+        var url = window.location.pathname.replace(/\/+$/, '') + '/update_ajax?all=1';
+        fetch(url, { cache: 'no-store' })
+            .catch(function(e) { console.error('Update all trigger error', e); });
+
+        initStatusWatcher();
+    }
+
+    // Защищенный опрос статуса обновления без зацикливания, без DDoS и БЕЗ перезагрузки страницы
     function initStatusWatcher() {
+        if (window.__subconv_watcher_running) return;
         var targets = document.querySelectorAll('.subconv-status-updating');
         if (!targets.length) return;
-        if (window.__subconv_watcher_running) return;
         window.__subconv_watcher_running = true;
 
         var attempts = 0;
-        var maxAttempts = 15; // 35-40 секунд максимум
+        var maxAttempts = 20; // ~40 секунд максимум
         var isRequestPending = false;
-        var retryDelay = 2500;
+        var retryDelay = 2000;
 
         function stopWatcher(reason) {
             window.__subconv_watcher_running = false;
+            var btnAll = document.querySelector('button[onclick*="triggerUpdateAll"]');
+            if (btnAll) {
+                btnAll.disabled = false;
+                btnAll.innerHTML = '🔄 Обновить все';
+            }
             if (reason === 'timeout') {
                 document.querySelectorAll('.subconv-status-updating').forEach(function(el) {
                     el.innerHTML = '<span style="color:#d97706; font-size:12px; font-weight:500;">⚠️ Таймаут</span> <a href="" onclick="location.reload();return false;" style="margin-left:3px; font-size:11px; text-decoration:underline; color:#2563eb;">[обновить]</a>';
+                });
+                document.querySelectorAll('button[onclick*="triggerSubUpdate"]').forEach(function(b) {
+                    b.disabled = false;
+                    b.innerHTML = '🔄';
                 });
             }
         }
@@ -1168,7 +1329,6 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
         function poll() {
             if (!window.__subconv_watcher_running) return;
 
-            // Если вкладка скрыта/не активна, не спамим запросами к роутеру
             if (document.hidden) {
                 setTimeout(poll, 3000);
                 return;
@@ -1180,9 +1340,8 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
                 return;
             }
 
-            // Защита от наложения запросов (anti-pileup)
             if (isRequestPending) {
-                setTimeout(poll, 1500);
+                setTimeout(poll, 1000);
                 return;
             }
 
@@ -1196,7 +1355,7 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
                 })
                 .then(function(data) {
                     isRequestPending = false;
-                    retryDelay = 2500;
+                    retryDelay = 2000;
                     var stillUpdating = false;
 
                     document.querySelectorAll('.subconv-status-updating').forEach(function(el) {
@@ -1204,29 +1363,45 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
                         if (data && data[sub]) {
                             var st = data[sub].last_type;
                             if (st && st !== 'Обновление...') {
-                                el.innerHTML = st;
-                                el.classList.remove('subconv-status-updating');
+                                // 1. Обновляем статус в таблице
+                                var statusCell = document.querySelector('.subconv-status-cell[data-sub="' + sub + '"]');
+                                if (statusCell) {
+                                    statusCell.innerHTML = st;
+                                }
+
+                                // 2. Обновляем данные подписки (трафик, дату) в реальном времени
+                                var infoCell = document.querySelector('.subconv-info-cell[data-sub="' + sub + '"]');
+                                if (infoCell && data[sub].info_html) {
+                                    infoCell.innerHTML = data[sub].info_html;
+                                }
+
+                                // 3. Возвращаем кнопку обновления в исходное состояние
+                                document.querySelectorAll('button[onclick*="triggerSubUpdate"]').forEach(function(b) {
+                                    if (b.getAttribute('onclick').indexOf("'" + sub + "'") !== -1) {
+                                        b.disabled = false;
+                                        b.innerHTML = '🔄';
+                                    }
+                                });
                             } else {
                                 stillUpdating = true;
                             }
                         }
                     });
 
-                    if (!document.querySelectorAll('.subconv-status-updating').length) {
+                    if (!document.querySelectorAll('.subconv-status-updating').length || !stillUpdating) {
                         stopWatcher('done');
-                        setTimeout(function() { location.reload(); }, 600);
                     } else {
                         setTimeout(poll, retryDelay);
                     }
                 })
                 .catch(function() {
                     isRequestPending = false;
-                    retryDelay = Math.min(retryDelay * 1.5, 6000);
+                    retryDelay = Math.min(retryDelay * 1.5, 5000);
                     setTimeout(poll, retryDelay);
                 });
         }
 
-        setTimeout(poll, 1500);
+        setTimeout(poll, 1000);
     }
 
     setTimeout(function() {
@@ -1391,7 +1566,7 @@ end
 -- ------------------------------------------
 -- СЕКЦИЯ 2: Таблица активных подписок
 -- ------------------------------------------
-local list_title = translate("Активные подписки") .. [[ <button type="submit" name="update_all" value="1" class="cbi-button cbi-button-apply" style="margin-left: 15px; font-size: 12px; padding: 4px 12px;">🔄 Обновить все</button> <span style="font-weight: normal; font-size: 12px; opacity: 0.7; margin-left: 10px;">(процесс может занять некоторое время)</span>]]
+local list_title = translate("Активные подписки") .. [[ <button type="button" onclick="triggerUpdateAll(this)" class="cbi-button cbi-button-apply" style="margin-left: 15px; font-size: 12px; padding: 4px 12px;" title="Обновить все подписки">🔄 Обновить все</button> <span style="font-weight: normal; font-size: 12px; opacity: 0.7; margin-left: 10px;">(процесс может занять некоторое время)</span>]]
 local s_list = m:section(TypedSection, "subscription", list_title)
 s_list.anonymous = true
 s_list.addremove = false
@@ -1480,22 +1655,8 @@ interval_list:value("720", translate("12 часов"))
 interval_list:value("1440", translate("24 часа"))
 interval_list.rmempty = false
 
--- Отображение последнего статуса обработки
-local type_opt = s_list:option(DummyValue, "last_type", translate("Тип выдачи"))
-type_opt.rawhtml = true
-function type_opt.cfgvalue(self, section)
-    local val = uci:get("subconv", section, "last_type") or "Ожидание..."
-    if val == "Обновление..." then
-        return string.format('<span class="subconv-status-updating" data-sub="%s" style="display:inline-flex; align-items:center; gap:4px; font-weight:500; color:#2563eb;"><span class="subconv-spin">🔄</span> Обновление...</span>', section)
-    end
-    return val
-end
-
--- Колонка данных подписки (строго 3 строки без раздувания высоты)
-local link_opt = s_list:option(DummyValue, "_link", translate("Данные подписки"))
-link_opt.rawhtml = true
-function link_opt.cfgvalue(self, section)
-    local uinfo = uci:get("subconv", section, "userinfo")
+-- Вспомогательная функция форматирования данных подписки
+local function format_sub_info(id, uinfo)
     local l2, l3 = "", ""
     if uinfo and uinfo ~= "" then
         local used, total, exp = uinfo:match("^(%d+)|(%d+)|(%d+)$")
@@ -1558,7 +1719,26 @@ function link_opt.cfgvalue(self, section)
     else
         l2 = [[<div style="font-size: 11px; opacity: 0.5; margin-top: 2px; white-space: nowrap;">(нет данных)</div>]]
     end
-    return string.format([[<div style="line-height: 1.3; white-space: nowrap;"><div style="font-size: 13px; font-weight: bold;">%s</div>%s%s</div>]], section, l2, l3)
+    return string.format([[<div style="line-height: 1.3; white-space: nowrap;"><div style="font-size: 13px; font-weight: bold;">%s</div>%s%s</div>]], id, l2, l3)
+end
+
+-- Отображение последнего статуса обработки
+local type_opt = s_list:option(DummyValue, "last_type", translate("Тип выдачи"))
+type_opt.rawhtml = true
+function type_opt.cfgvalue(self, section)
+    local val = uci:get("subconv", section, "last_type") or "Ожидание..."
+    if val == "Обновление..." then
+        return string.format('<span class="subconv-status-cell subconv-status-updating" data-sub="%s" style="display:inline-flex; align-items:center; gap:4px; font-weight:500; color:#2563eb;"><span class="subconv-spin">🔄</span> Обновление...</span>', section)
+    end
+    return string.format('<span class="subconv-status-cell" data-sub="%s">%s</span>', section, val)
+end
+
+-- Колонка данных подписки (строго 3 строки без раздувания высоты)
+local link_opt = s_list:option(DummyValue, "_link", translate("Данные подписки"))
+link_opt.rawhtml = true
+function link_opt.cfgvalue(self, section)
+    local uinfo = uci:get("subconv", section, "userinfo")
+    return string.format('<span class="subconv-info-cell" data-sub="%s">%s</span>', section, format_sub_info(section, uinfo))
 end
 
 -- Кнопка [ 🔗 ]: Скопировать ссылку
@@ -1581,14 +1761,11 @@ btn_dl_txt.rawhtml = true
 function btn_dl_txt.cfgvalue(self, section)
     return string.format([[<a href="/%s.txt" download="%s.txt" class="cbi-button cbi-button-neutral" style="padding: 4px 8px; font-size: 13px; margin: 0 1px; min-width: 30px; height: 30px; line-height: 20px; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;" title="Скачать расшифрованный список (.txt)">💾</a>]], section, section)
 end
-local btn_upd_list = s_list:option(Button, "_update", translate(" "))
-btn_upd_list.inputtitle = "🔄"
-btn_upd_list.inputstyle = "apply"
-function btn_upd_list.write(self, section)
-    uci:set("subconv", section, "last_type", "Обновление...")
-    uci:commit("subconv")
-    sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(section) .. " >/dev/null 2>&1 &")
-    http.redirect(dsp.build_url("admin", "services", "subconv"))
+-- Кнопка [ 🔄 ]: Обновить подписку (через AJAX без перезагрузки всей страницы)
+local btn_upd_list = s_list:option(DummyValue, "_update", translate(" "))
+btn_upd_list.rawhtml = true
+function btn_upd_list.cfgvalue(self, section)
+    return string.format([[<button type="button" onclick="triggerSubUpdate(this, '%s')" class="cbi-button cbi-button-apply" style="padding: 4px 8px; font-size: 13px; margin: 0 1px; min-width: 30px; height: 30px; line-height: 20px;" title="Обновить подписку">🔄</button>]], section)
 end
 
 -- Кнопка удаления подписки (удаляет из конфига и удаляет .txt файл)
@@ -1638,18 +1815,6 @@ end
 -- После сохранения любых настроек (в том числе интервалов) - перезаписываем Cron-задачи
 function m.on_after_commit(self)
     sys.call("/usr/libexec/subconv-cron.sh")
-end
-
--- Обработчик скрытой формы: "Обновить все"
-if http.formvalue("update_all") == "1" then
-    uci:foreach("subconv", "subscription", function(s)
-        if s.interval ~= "0" then
-            uci:set("subconv", s['.name'], "last_type", "Обновление...")
-            sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(s['.name']) .. " >/dev/null 2>&1 &")
-        end
-    end)
-    uci:commit("subconv")
-    http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
 -- Обработчик скрытой формы: "Обновить плагин" (из бейджика в заголовке)
