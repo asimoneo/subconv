@@ -146,6 +146,7 @@ local sys = require "luci.sys"
 
 -- ID подписки передается первым аргументом командной строки
 local sub_id = arg[1]
+local trigger_type = arg[2] or "manual"
 local debug_file = "/www/subconv_debug.txt"
 
 -- ==========================================
@@ -304,7 +305,15 @@ end
 -- ==========================================
 local function main()
 
-log("=== СТАРТ ОБНОВЛЕНИЯ ===")
+local trigger_desc = "вручную"
+if trigger_type == "cron" then
+    trigger_desc = "по расписанию (Cron)"
+elseif trigger_type == "manual_all" then
+    trigger_desc = "по кнопке 'Обновить все'"
+elseif trigger_type == "cli" then
+    trigger_desc = "из командной строки"
+end
+log(string.format("=== СТАРТ ОБНОВЛЕНИЯ (%s) ===", trigger_desc))
 
 -- Проверяем, передан ли ID подписки
 if not sub_id or sub_id == "" then
@@ -412,6 +421,7 @@ if is_raw then
     if write_to_file(out_path, decoded) then
         log("УСПЕХ: Сохранен как сырой конфиг (JSON/YAML)")
         save_status("JSON/YAML Конфиг")
+        log(string.format("=== Обновление %s завершено успешно (%s)! ===", sub_id, trigger_desc))
     else
         exit_with_error("Не удалось записать файл " .. out_path, "Ошибка записи")
     end
@@ -429,6 +439,7 @@ else
         if write_to_file(out_path, table.concat(links, "\n") .. "\n") then
             log("УСПЕХ: Найдено " .. #links .. " узлов URI")
             save_status(is_b64 and ("Base64 (" .. #links .. ")") or ("Текст (" .. #links .. ")"))
+            log(string.format("=== Обновление %s завершено успешно (%s)! ===", sub_id, trigger_desc))
         else
             exit_with_error("Не удалось записать файл " .. out_path, "Ошибка записи")
         end
@@ -479,7 +490,7 @@ add_cron() {
             *)      cron_expr="0 4 * * *" ;;
         esac
         
-        if [ -n "$cron_expr" ]; then echo "$cron_expr /usr/libexec/subconv-update.sh $cfg >/dev/null 2>&1" >> /etc/crontabs/root; fi
+        if [ -n "$cron_expr" ]; then echo "$cron_expr /usr/libexec/subconv-update.sh $cfg cron >/dev/null 2>&1" >> /etc/crontabs/root; fi
     fi
 }
 config_load subconv
@@ -516,6 +527,7 @@ function index()
     entry({"admin", "services", "subconv", "status"}, call("action_status")).leaf = true
     entry({"admin", "services", "subconv", "update_ajax"}, call("action_update_ajax")).leaf = true
     entry({"admin", "services", "subconv", "set_param"}, call("action_set_param")).leaf = true
+    entry({"admin", "services", "subconv", "clear_log"}, call("action_clear_log")).leaf = true
 end
 
 local function format_sub_info(id, uinfo)
@@ -655,7 +667,7 @@ function action_update_ajax()
             --    одновременных запросов с одним и тем же HWID
             local cmds = {}
             for _, id in ipairs(ids) do
-                cmds[#cmds + 1] = "/usr/libexec/subconv-update.sh " .. util.shellquote(id)
+                cmds[#cmds + 1] = "/usr/libexec/subconv-update.sh " .. util.shellquote(id) .. " manual_all"
             end
             sys.call("( " .. table.concat(cmds, "; ") .. " ) >/dev/null 2>&1 </dev/null &")
         end
@@ -672,7 +684,7 @@ function action_update_ajax()
         end
         uci:set("subconv", sub, "last_type", "Обновление...")
         uci:commit("subconv")
-        sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(sub) .. " >/dev/null 2>&1 &")
+        sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(sub) .. " manual >/dev/null 2>&1 &")
         http.prepare_content("application/json")
         http.write('{"status":"ok","sub":"' .. sub .. '"}')
         return
@@ -705,6 +717,13 @@ function action_set_param()
 
     http.prepare_content("application/json")
     http.write('{"status":"error"}')
+end
+
+function action_clear_log()
+    local http = require "luci.http"
+    os.remove("/www/subconv_debug.txt")
+    http.prepare_content("application/json")
+    http.write('{"status":"ok"}')
 end
 EOF
 
@@ -759,6 +778,15 @@ local function get_sys_info()
 end
 
 local sys_os, sys_model, sys_hwid, random_hwid = get_sys_info()
+
+local function append_subconv_log(tag, msg)
+    local f = io.open("/www/subconv_debug.txt", "a")
+    if f then
+        local ts = os.date("%Y-%m-%d %H:%M:%S")
+        f:write(string.format("%s [%s] %s\n", ts, tag or "system", msg))
+        f:close()
+    end
+end
 
 -- ==========================================
 -- Константы для HTML и JavaScript
@@ -1269,6 +1297,42 @@ local CSS_TWEAKS = [===[<style>
     margin-top: 10px !important;
     border-radius: 4px !important;
   }
+
+  /* 8. Диалоговое окно подтверждения дубликата URL */
+  .subconv-modal-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.65);
+    z-index: 99999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(2px);
+  }
+  .subconv-modal-box {
+    background: #ffffff;
+    color: #1e293b;
+    border-radius: 8px;
+    padding: 24px;
+    max-width: 480px;
+    width: 90%;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+    font-size: 14px;
+    line-height: 1.5;
+    box-sizing: border-box;
+  }
+  body.dark-mode .subconv-modal-box,
+  [data-theme="dark"] .subconv-modal-box {
+    background: #1e222a;
+    color: #e2e8f0;
+    border: 1px solid #334155;
+  }
+  .subconv-modal-actions {
+    margin-top: 20px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+  }
 </style>]===]
 
 local JS_TWEAKS_PART1 = [===[<script>
@@ -1436,21 +1500,35 @@ local JS_TWEAKS_PART2 = [===[';
                 btnClear.style.cssText = 'margin: 0; font-size: 12px; padding: 3px 10px; height: 26px; line-height: 18px; cursor: pointer; vertical-align: middle;';
                 logHdr.appendChild(btnClear);
 
-                var btnRefresh = document.getElementById('btn-refresh-log');
-                if (!btnRefresh) {
-                    btnRefresh = document.createElement('button');
-                    btnRefresh.type = 'button';
-                    btnRefresh.id = 'btn-refresh-log';
-                    btnRefresh.className = 'cbi-button cbi-button-apply';
-                    btnRefresh.style.cssText = 'margin: 0; font-size: 12px; padding: 3px 10px; height: 26px; line-height: 18px; cursor: pointer; vertical-align: middle;';
-                    btnRefresh.innerText = '🔄 Обновить лог';
-                    btnRefresh.onclick = function() {
-                        btnRefresh.innerText = '🔄...';
-                        refreshDebugLog();
-                        setTimeout(function() { btnRefresh.innerText = '🔄 Обновить лог'; }, 600);
-                    };
-                    logHdr.appendChild(btnRefresh);
-                }
+                // Очистка лога через AJAX без перезагрузки страницы
+                btnClear.onclick = function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (btnClear.disabled) return false;
+                    btnClear.disabled = true;
+                    var origText = btnClear.value || btnClear.innerText || 'Очистить лог';
+                    if (btnClear.tagName === 'INPUT') btnClear.value = 'Очистка...';
+                    else btnClear.innerText = 'Очистка...';
+
+                    var clearUrl = window.location.pathname.replace(/\/+$/, '') + '/clear_log';
+                    fetch(clearUrl, { method: 'POST', cache: 'no-store' })
+                        .then(function(r) { return r.json(); })
+                        .then(function(res) {
+                            var logEl = document.getElementById('subconv-debug-log');
+                            if (logEl) logEl.value = '';
+                            showToast('Журнал отладки очищен');
+                        })
+                        .catch(function(err) {})
+                        .finally(function() {
+                            btnClear.disabled = false;
+                            if (btnClear.tagName === 'INPUT') btnClear.value = origText;
+                            else btnClear.innerText = origText;
+                        });
+                    return false;
+                };
+
+                var oldRefresh = document.getElementById('btn-refresh-log');
+                if (oldRefresh) oldRefresh.remove();
             }
         }
 
@@ -1627,9 +1705,104 @@ local JS_TWEAKS_PART2 = [===[';
         table.addEventListener('blur', function(e) { syncField(e.target); }, true);
     }
 
+
+    function showDuplicateConfirmModal(dupId, onConfirm) {
+        var old = document.getElementById('subconv-dup-modal');
+        if (old) old.remove();
+
+        var overlay = document.createElement('div');
+        overlay.id = 'subconv-dup-modal';
+        overlay.className = 'subconv-modal-overlay';
+        overlay.innerHTML = 
+            '<div class="subconv-modal-box">' +
+                '<h3 style="margin-top:0; font-size:16px; display:flex; align-items:center; gap:8px;">' +
+                    '<span style="font-size:20px;">⚠️</span> <span>Обнаружена подписка с таким же URL</span>' +
+                '</h3>' +
+                '<p style="font-size:14px; line-height:1.6; margin: 14px 0;">' +
+                    'Уже есть такая подписка <b>«' + dupId + '»</b>, точно хотите добавить новую?' +
+                '</p>' +
+                '<div style="background: rgba(234, 179, 8, 0.12); border-left: 4px solid #eab308; padding: 10px 14px; border-radius: 4px; font-size: 13px; line-height: 1.5; margin-bottom: 18px;">' +
+                    'Удостоверьтесь, что в параметрах подписки указаны другие данные, чтобы сервер считал новую подписку новым устройством (в частности, обычно, <b>HWID</b>).' +
+                '</div>' +
+                '<div class="subconv-modal-actions">' +
+                    '<button type="button" class="cbi-button cbi-button-neutral" id="subconv-dup-cancel" style="padding: 5px 14px; font-size: 13px;">Отмена</button>' +
+                    '<button type="button" class="cbi-button cbi-button-apply" id="subconv-dup-ok" style="padding: 5px 14px; font-size: 13px; margin-left: 8px;">Да, добавить</button>' +
+                '</div>' +
+            '</div>';
+
+        document.body.appendChild(overlay);
+
+        document.getElementById('subconv-dup-cancel').onclick = function() {
+            overlay.remove();
+        };
+
+        document.getElementById('subconv-dup-ok').onclick = function() {
+            overlay.remove();
+            if (onConfirm) onConfirm();
+        };
+    }
+
+    function initDuplicateValidation() {
+        var addBtn = document.querySelector('[name="cbid.subconv.add._add"]');
+        if (!addBtn || addBtn.dataset.dupValidationInit) return;
+        addBtn.dataset.dupValidationInit = 'true';
+
+        addBtn.addEventListener('click', function(e) {
+            if (addBtn.dataset.confirmedDup === 'true') {
+                addBtn.dataset.confirmedDup = '';
+                return true;
+            }
+
+            var idInp = document.querySelector('[name="cbid.subconv.add.sub_id"]');
+            var urlInp = document.querySelector('[name="cbid.subconv.add.url"]');
+            if (!idInp || !urlInp) return true;
+
+            var idVal = idInp.value ? idInp.value.trim() : '';
+            var urlVal = urlInp.value ? urlInp.value.trim() : '';
+            if (!idVal || !urlVal) return true;
+
+            var cleanUrl = urlVal.replace(/\/+$/, '').toLowerCase();
+            var dup = null;
+
+            document.querySelectorAll('tr[id^="cbi-subconv-"]').forEach(function(row) {
+                if (dup) return;
+                var sId = row.id.replace(/^cbi-subconv-/, '');
+                var cell = row.querySelector('[data-sub-url]');
+                if (cell && sId) {
+                    var curUrl = (cell.getAttribute('data-sub-url') || '').trim().replace(/\/+$/, '').toLowerCase();
+                    if (curUrl && curUrl === cleanUrl) {
+                        dup = { id: sId, url: cell.getAttribute('data-sub-url') };
+                    }
+                }
+            });
+
+            if (dup) {
+                e.preventDefault();
+                e.stopPropagation();
+                showDuplicateConfirmModal(dup.id, function() {
+                    var form = addBtn.form || addBtn.closest('form');
+                    if (form) {
+                        var hiddenInput = form.querySelector('[name="cbid.subconv.add.allow_dup"]');
+                        if (!hiddenInput) {
+                            hiddenInput = document.createElement('input');
+                            hiddenInput.type = 'hidden';
+                            hiddenInput.name = 'cbid.subconv.add.allow_dup';
+                            form.appendChild(hiddenInput);
+                        }
+                        hiddenInput.value = '1';
+                    }
+                    addBtn.dataset.confirmedDup = 'true';
+                    addBtn.click();
+                });
+                return false;
+            }
+        }, true);
+    }
+
     function alignFormAndTable() {
         initHeaderAndSections();
         initTableChangeHandlers();
+        initDuplicateValidation();
 
         document.querySelectorAll('.cbi-section-descr, span').forEach(function(s) {
             if (s.innerText && s.innerText.indexOf('процесс может занять некоторое время') !== -1) {
@@ -2085,7 +2258,7 @@ function btn_add.write(self, section)
         return
     end
 
-    -- Проверка на дубликат URL
+    -- Проверка на дубликат URL (разрешаем при подтверждении пользователем)
     local dup_sub = nil
     local norm_new_url = new_url:gsub("/+$", "")
     uci:foreach("subconv", "subscription", function(s)
@@ -2095,8 +2268,9 @@ function btn_add.write(self, section)
         end
     end)
 
-    if dup_sub then
-        m.message = "Ошибка: Подписка с таким URL уже существует (ID: " .. dup_sub .. ")!"
+    local allow_dup = m:formvalue("cbid.subconv.add.allow_dup")
+    if dup_sub and allow_dup ~= "1" then
+        m.message = "Ошибка: Подписка с таким URL уже существует (ID: " .. dup_sub .. ")! Подтвердите добавление."
         return
     end
 
@@ -2118,8 +2292,20 @@ function btn_add.write(self, section)
     uci:set("subconv", "add", "sub_id", "")
     uci:set("subconv", "add", "url", "")
     uci:commit("subconv")
-    
-    sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(new_id) .. " >/dev/null 2>&1 &")
+
+    local masked_u = new_url:gsub("^(%a+://[^/]+/)(.*)$", function(prefix, secret)
+        if #secret > 8 then return prefix .. "••••" .. secret:sub(-4)
+        else return prefix .. "••••" end
+    end)
+
+    if dup_sub then
+        append_subconv_log(new_id, string.format("Подписка успешно добавлена (подтвержден дубликат URL подписки '%s'). URL=%s | UA=%s | HWID=%s", dup_sub, masked_u, new_ua, new_hwid))
+    else
+        append_subconv_log(new_id, string.format("Подписка успешно добавлена. URL=%s | UA=%s | HWID=%s", masked_u, new_ua, new_hwid))
+    end
+
+    sys.call("/usr/libexec/subconv-cron.sh")
+    sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(new_id) .. " manual >/dev/null 2>&1 &")
     http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
@@ -2335,9 +2521,11 @@ local btn_del_list = s_list:option(Button, "_delete", translate(" "))
 btn_del_list.inputtitle = "🗑️"
 btn_del_list.inputstyle = "remove"
 function btn_del_list.write(self, section)
+    append_subconv_log(section, "Подписка удалена пользователем.")
     os.execute("rm -f " .. util.shellquote("/www/" .. section .. ".txt"))
     uci:delete("subconv", section)
     uci:commit("subconv")
+    sys.call("/usr/libexec/subconv-cron.sh")
     http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
