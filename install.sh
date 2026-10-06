@@ -765,7 +765,7 @@ local sys_os, sys_model, sys_hwid, random_hwid = get_sys_info()
 -- ==========================================
 local current_ver = "0.3.16"
 
-local title_html = string.format([[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;" id="plugin-ver-text">v%s</span> <button type="button" class="cbi-button" style="margin-left: 10px; font-size: 12px; padding: 2px 6px;" id="btn-check-ver" onclick="checkPluginVersion()">Проверить обновления</button><button type="button" class="cbi-button cbi-button-apply" style="margin-left: 5px; font-size: 12px; padding: 2px 6px; display: none;" id="btn-do-update" onclick="doPluginUpdate()">Обновить</button>]], current_ver)
+local title_html = [[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;" id="plugin-ver-text">v]] .. current_ver .. [[</span> <button type="button" class="cbi-button" style="margin-left: 10px; font-size: 12px; padding: 2px 6px;" id="btn-check-ver" onclick="checkPluginVersion()">Проверить обновления</button><button type="button" class="cbi-button cbi-button-apply" style="margin-left: 5px; font-size: 12px; padding: 2px 6px; display: none;" id="btn-do-update" onclick="doPluginUpdate()">Обновить</button>]]
 
 local CSS_TWEAKS = [===[<style>
   /* 1. Выделение и плавная анимация (0.8с) раскрытия формы добавления */
@@ -1271,13 +1271,11 @@ local CSS_TWEAKS = [===[<style>
   }
 </style>]===]
 
-local JS_TWEAKS_TEMPLATE = [===[<script>
+local JS_TWEAKS_PART1 = [===[<script>
     function fallbackCopy(text, cb) {
         var ta = document.createElement('textarea');
         ta.value = text;
         ta.style.position = 'fixed';
-        ta.style.top = '0';
-        ta.style.left = '0';
         ta.style.opacity = '0';
         document.body.appendChild(ta);
         ta.select();
@@ -1342,7 +1340,9 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
                 var match = text.match(/VERSION=["']([^"']+)["']/);
                 if(match) {
                     var remote = match[1];
-                    var current = '%s';
+                    var current = ']===]
+
+local JS_TWEAKS_PART2 = [===[';
                     var verText = document.getElementById('plugin-ver-text');
                     if(remote !== current) {
                         verText.innerHTML = 'v' + current + ' &rarr; <b style="color:#ff9800;">v' + remote + '</b>';
@@ -1927,7 +1927,9 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
     setTimeout(function() {
         var title = document.querySelector('h2');
         if(title && title.innerText.includes('Subconv')) {
-            title.innerHTML = '%s';
+            title.innerHTML = ']===]
+
+local JS_TWEAKS_PART3 = [===[';
         }
         alignFormAndTable();
         initStatusWatcher();
@@ -2032,7 +2034,7 @@ end
 local f_js = s_add:option(DummyValue, "_js_tweaks")
 f_js.rawhtml = true
 function f_js.cfgvalue()
-    return CSS_TWEAKS .. string.format(JS_TWEAKS_TEMPLATE, current_ver, title_html:gsub("'", "\\'"))
+    return CSS_TWEAKS .. JS_TWEAKS_PART1 .. current_ver .. JS_TWEAKS_PART2 .. (title_html:gsub("'", "\\'")) .. JS_TWEAKS_PART3
 end
 
 local btn_add = s_add:option(Button, "_add", "")
@@ -2079,7 +2081,7 @@ function btn_add.write(self, section)
     local is_happ = new_url:match("^happ://%S+")
     local is_v2t  = new_url:match("^v2raytun://%S+")
     if not (is_http or is_happ or is_v2t) then
-        m.message = "Ошибка: Некорректный URL подписки! Ссылка должна начинаться с http://, https:// или happ://"
+        m.message = "Ошибка: Некорректный URL подписки! Ссылка должна начинаться с http://, https://, happ:// или v2raytun://"
         return
     end
 
@@ -2365,7 +2367,7 @@ function log_view.cfgvalue(self, section)
     if f then f:close() end
     content = content:gsub("<", "&lt;"):gsub(">", "&gt;")
     -- Вывод логов в полноразмерный терминал с автопрокруткой вниз
-    return string.format('<textarea id="subconv-debug-log" readonly wrap="off" style="width: 100%%; max-width: 100%%; min-width: 100%%; height: 350px; background: #1a1b26; color: #a9b1d6; font-family: monospace; font-size: 13px; padding: 10px; border: 1px solid #333; margin-top: 10px; box-sizing: border-box; display: block; border-radius: 4px;">%s</textarea><script>setTimeout(function(){var l=document.getElementById("subconv-debug-log");if(l){l.scrollTop=l.scrollHeight;}}, 100);</script>', content)
+    return '<textarea id="subconv-debug-log" readonly wrap="off" style="width: 100%; max-width: 100%; min-width: 100%; height: 350px; background: #1a1b26; color: #a9b1d6; font-family: monospace; font-size: 13px; padding: 10px; border: 1px solid #333; margin-top: 10px; box-sizing: border-box; display: block; border-radius: 4px;">' .. content .. '</textarea><script>setTimeout(function(){var l=document.getElementById("subconv-debug-log");if(l){l.scrollTop=l.scrollHeight;}}, 100);</script>'
 end
 
 -- ==========================================
