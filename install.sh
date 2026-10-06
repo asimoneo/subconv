@@ -1,27 +1,74 @@
 #!/bin/sh
+# =====================================================================
+# Subconv Installer & Updater (v0.3.16)
+# =====================================================================
+# Автоматический скрипт установки и обновления плагина Subconv для OpenWrt.
+# Поддерживает архитектуры: x86_64, aarch64, arm, mips.
+# =====================================================================
 
 VERSION="0.3.16"
-action="${1}"
 
-echo "========================================================="
-echo "        Установка Subconv v$VERSION                      "
-echo "========================================================="
+# Цвета для вывода в терминал
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-if [ -z "$action" ]; then
+# Очистка экрана и приветствие
+clear
+echo "======================================================"
+echo "          Subconv Installer & Updater v${VERSION}        "
+echo "======================================================"
+echo ""
+
+# Проверка режима запуска (через аргументы командной строки)
+# Пример: sh install.sh -s 1 (тихий режим, обновление)
+# Пример: sh install.sh -s 2 (тихий режим, удаление)
+SILENT_MODE=0
+ACTION_CHOICE=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -s|--silent)
+            SILENT_MODE=1
+            ACTION_CHOICE="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+if [ "$SILENT_MODE" -eq 0 ]; then
     echo "Выберите действие:"
-    echo " 1) Установить / Обновить плагин"
-    echo " 2) Полностью УДАЛИТЬ плагин и все его файлы"
-    echo "========================================================="
+    echo "1) Установить / Обновить Subconv"
+    echo "2) Полностью удалить Subconv"
+    echo "0) Выход"
+    echo ""
     printf "Ваш выбор [1]: "
-    read action
-    action=${action:-1}
+    read -r user_choice
+    if [ -z "$user_choice" ]; then
+        ACTION_CHOICE=1
+    else
+        ACTION_CHOICE="$user_choice"
+    fi
 fi
 
-if [ "$action" = "2" ]; then
-    echo "Удаление Subconv..."
+if [ "$ACTION_CHOICE" -eq 0 ]; then
+    echo "Отмена операции."
+    exit 0
+fi
+
+if [ "$ACTION_CHOICE" -eq 2 ]; then
+    echo ""
+    echo "🗑️ Удаление Subconv..."
     
+    # Удаление созданных файлов подписок
     if [ -f /etc/config/subconv ]; then
-        for sub in $(grep -E "config subscription" /etc/config/subconv | awk -F"'" '{print $2}'); do
+        SUBS=$(uci show subconv | grep "=subscription" | cut -d'.' -f2 | cut -d'=' -f1)
+        for sub in $SUBS; do
             if [ -n "$sub" ]; then
                 rm -f "/www/${sub}.txt"
             fi
@@ -54,13 +101,31 @@ if [ "$action" = "2" ]; then
 fi
 
 if ! command -v curl >/dev/null 2>&1; then
-    /bin/opkg update
-    /bin/opkg install curl
+    echo "📦 Установка зависимости: curl..."
+    if which apk >/dev/null 2>&1; then
+        apk add curl
+    else
+        opkg update && opkg install curl
+    fi
 fi
 
+if which apk >/dev/null 2>&1; then
+    if ! apk info -e luci-compat >/dev/null 2>&1; then
+        echo "📦 Установка зависимости: luci-compat..."
+        apk add luci-compat
+    fi
+else
+    if ! opkg list-installed | grep -q "^luci-compat "; then
+        echo "📦 Установка зависимости: luci-compat..."
+        opkg update && opkg install luci-compat
+    fi
+fi
+
+echo "🚀 Установка / Обновление Subconv v${VERSION}..."
+
 mkdir -p /usr/libexec
-mkdir -p /usr/lib/lua/luci/model/cbi
 mkdir -p /usr/lib/lua/luci/controller
+mkdir -p /usr/lib/lua/luci/model/cbi
 mkdir -p /usr/share/luci/menu.d
 mkdir -p /usr/share/rpcd/acl.d
 
@@ -86,7 +151,7 @@ local debug_file = "/www/subconv_debug.txt"
 -- Вспомогательные функции
 -- ==========================================
 
--- Функция записи логов отладки
+-- Запись в журнал отладки
 local function log(msg)
     local f_dbg = io.open(debug_file, "a")
     if f_dbg then
@@ -96,28 +161,12 @@ local function log(msg)
     end
 end
 
--- Функция сохранения статуса обновления в UCI для отображения в веб-интерфейсе
-local function save_status(msg)
-    if not sub_id then return end
-    local u = require "luci.model.uci".cursor()
-    u:set("subconv", sub_id, "last_type", msg)
-    u:commit("subconv")
-    os.remove("/tmp/subconv_status.json")
-end
-
--- Централизованный обработчик ошибок (пишет в лог, обновляет статус и завершает работу)
-local function exit_with_error(msg, status_msg)
-    log("ОШИБКА: " .. msg)
-    if status_msg then save_status(status_msg) end
-    os.exit(1)
-end
-
--- Функция маскировки URL (стандарт токенов GitHub / AWS, аналогично таблице)
-local function mask_url(val)
-    if not val or val == "" then return "" end
-    if #val <= 18 then return val end
-    local tail = val:sub(-4)
-    local body = val:sub(1, -5)
+-- Безопасное маскирование приватных URL и токенов (стандарт GitHub / AWS)
+local function mask_url(u)
+    if not u or u == "" then return "" end
+    if #u <= 18 then return u end
+    local tail = u:sub(-4)
+    local body = u:sub(1, -5)
     local scheme_domain, path = body:match("^([%a%d%+%.%-]+://[^/]+)(/?.*)$")
     local prefix = ""
     local max_prefix = 27
@@ -138,104 +187,158 @@ local function mask_url(val)
     return prefix .. "••••" .. tail
 end
 
--- Дешифровка проприетарных ссылок happ://crypt с помощью локального Go-бинарника
-local function decrypt_happ_url(url)
-    local bin_path = "/usr/libexec/happ-decrypt"
-    local bin_ver = "unknown"
-    if nixio.fs.access(bin_path) then
-        local v_handle = io.popen(bin_path .. " --version 2>/dev/null")
-        if v_handle then
-            bin_ver = v_handle:read("*l") or "unknown"
-            v_handle:close()
-        end
-    end
-    log("Обнаружена крипто-ссылка: " .. mask_url(url) .. ". Дешифратор: " .. bin_ver .. "...")
-
-    if not nixio.fs.access(bin_path) then
-        exit_with_error("Бинарник дешифратора не найден.", "Нет дешифратора")
-    end
-    
-    -- Вызов бинарника с передачей зашифрованного URL
-    local handle = io.popen(bin_path .. " " .. util.shellquote(url) .. " 2>&1")
-    local result = handle and handle:read("*all") or ""
-    if handle then handle:close() end
-    
-    -- Парсинг результата (ищем прямую ссылку)
-    local decrypted = result:match("Result\r?\n(https?://%S+)") or result:match("Result\r?\n(%S+)")
-    
-    if decrypted and decrypted:match("^http") then
-        log("Успешно расшифровано! Истинный URL: " .. mask_url(decrypted))
-        return decrypted
-    else
-        exit_with_error("Сбой дешифровки: " .. tostring(result):sub(1, 150), "Сбой дешифровки")
-    end
-end
-
--- Загрузка списка узлов с сервера провайдера с подменой заголовков (User-Agent, HWID)
-local function parse_userinfo(hdr_file)
-    local f = io.open(hdr_file, "r")
-    if not f then return nil end
-    local content = f:read("*all")
-    f:close()
-    os.remove(hdr_file)
-    if not content or content == "" then return nil end
-    local uinfo_line = content:lower():match("subscription%-userinfo%s*:[^%c]+")
-    if not uinfo_line then return nil end
-    local upload = tonumber(uinfo_line:match("upload=(%d+)")) or 0
-    local download = tonumber(uinfo_line:match("download=(%d+)")) or 0
-    local total = tonumber(uinfo_line:match("total=(%d+)")) or 0
-    local expire = tonumber(uinfo_line:match("expire=(%d+)")) or 0
-    return string.format("%.0f|%.0f|%.0f", upload + download, total, expire)
-end
-
-local function fetch_subscription(url, ua, hwid, dev_os, dev_model, hdr_file)
-    local cmd = string.format("curl -k -L -s -D %s -w '%%{http_code}' --connect-timeout 10 --max-time 30 -A %s -H %s -H %s -H %s %s",
-        util.shellquote(hdr_file),
-        util.shellquote(ua),
-        util.shellquote("X-HWID: " .. hwid),
-        util.shellquote("X-DEVICE-OS: " .. dev_os),
-        util.shellquote("X-DEVICE-MODEL: " .. dev_model),
-        util.shellquote(url)
-    )
-    local handle = io.popen(cmd)
-    local resp_raw = handle and handle:read("*all") or ""
-    if handle then handle:close() end
-    return resp_raw
-end
-
-local function write_to_file(path, content_data)
-    local f_out = io.open(path, "w")
-    if f_out then
-        f_out:write(content_data)
-        f_out:close()
+-- Запись текста в файл (атомарно, с проверкой ошибок)
+local function write_to_file(path, content)
+    local f = io.open(path, "w")
+    if f then
+        f:write(content)
+        f:close()
         return true
     end
     return false
 end
 
+-- Сохранение статуса последней операции в UCI
+local function save_status(status_text)
+    if sub_id then
+        uci:set("subconv", sub_id, "last_type", status_text)
+        uci:commit("subconv")
+        -- Сбрасываем серверный кэш статуса для мгновенного обновления в веб-интерфейсе
+        os.remove("/tmp/subconv_status.json")
+    end
+end
+
+-- Аварийное завершение работы с записью ошибки в лог и статусы
+local function exit_with_error(log_msg, status_msg)
+    log("ОШИБКА: " .. log_msg)
+    save_status(status_msg or "Ошибка")
+    os.exit(1)
+end
+
 -- ==========================================
--- Главный процесс
+-- Логика парсинга данных подписки (биллинг)
+-- ==========================================
+-- Читает служебные заголовки ответа (subscription-userinfo)
+local function parse_userinfo(header_file)
+    local f = io.open(header_file, "r")
+    if not f then return nil end
+    local content = f:read("*all")
+    f:close()
+    os.remove(header_file)
+
+    -- Ищем заголовок subscription-userinfo (регистронезависимо)
+    for line in content:gmatch("[^\r\n]+") do
+        local uinfo = line:match("^[Ss][Uu][Bb][Ss][Cc][Rr][Ii][Pp][Tt][Ii][Oo][Nn]%-[Uu][Ss][Ee][Rr][Ii][Nn][Ff][Oo]:%s*(.-)%s*$")
+        if uinfo then
+            local upload = tonumber(uinfo:match("upload=(%d+)") or 0)
+            local download = tonumber(uinfo:match("download=(%d+)") or 0)
+            local total = tonumber(uinfo:match("total=(%d+)") or 0)
+            local expire = tonumber(uinfo:match("expire=(%d+)") or 0)
+            local used = upload + download
+            return string.format("%d|%d|%d", used, total, expire)
+        end
+    end
+    return nil
+end
+
+-- ==========================================
+-- Логика скачивания подписки (HTTP GET)
+-- ==========================================
+local function fetch_subscription(url, ua, hwid, dev_os, dev_model, header_output)
+    local tmp_file = "/tmp/sub_resp_" .. (sub_id or "tmp") .. ".bin"
+    os.remove(tmp_file)
+
+    -- Формируем команду curl с эмуляцией заголовков клиента
+    local cmd = string.format(
+        "curl -s -L -k --connect-timeout 15 -m 30 " ..
+        "-H %s -H %s -H %s -H %s " ..
+        "-D %s " ..
+        "-w '%%{http_code}' " ..
+        "%s -o %s",
+        util.shellquote("User-Agent: " .. ua),
+        util.shellquote("device-hwid: " .. hwid),
+        util.shellquote("device-os: " .. dev_os),
+        util.shellquote("device-model: " .. dev_model),
+        util.shellquote(header_output),
+        util.shellquote(url),
+        util.shellquote(tmp_file)
+    )
+
+    -- Выполняем curl и читаем возвращенный HTTP-код
+    local pipe = io.popen(cmd)
+    local http_code = pipe:read("*all")
+    pipe:close()
+
+    local f = io.open(tmp_file, "rb")
+    local body = f and f:read("*all") or ""
+    if f then f:close() end
+    os.remove(tmp_file)
+
+    -- Возвращаем тело ответа вместе с кодом состояния
+    return body .. (http_code or "000")
+end
+
+-- ==========================================
+-- Точка входа в скрипт
 -- ==========================================
 
 log("=== СТАРТ ОБНОВЛЕНИЯ ===")
-if not sub_id then os.exit(1) end
 
--- 1. Считывание настроек подписки из конфигурации роутера (UCI)
-uci:load("subconv")
-local url = uci:get("subconv", sub_id, "url")
-if not url or url == "" then
-    exit_with_error("нет URL", "Ошибка: нет URL")
+-- Проверяем, передан ли ID подписки
+if not sub_id or sub_id == "" then
+    exit_with_error("Не указан ID подписки", "Ошибка (ID)")
 end
 
+-- Читаем конфигурацию подписки из /etc/config/subconv
+local url = uci:get("subconv", sub_id, "url")
 local ua = uci:get("subconv", sub_id, "user_agent") or "SubConv/1.0"
 local hwid = uci:get("subconv", sub_id, "hwid") or "openwrt-router-default"
 local dev_os = uci:get("subconv", sub_id, "device_os") or "OpenWrt"
 local dev_model = uci:get("subconv", sub_id, "device_model") or "OpenWrt Router"
 local out_path = "/www/" .. sub_id .. ".txt"
 
--- 2. Если ссылка проприетарная, расшифровываем ее перед загрузкой
+if not url or url == "" then
+    exit_with_error("В конфигурации отсутствует URL", "Ошибка (URL)")
+end
+
+-- 1. Проверяем, является ли ссылка зашифрованной (happ://)
 if url:match("^happ://") or url:match("^v2raytun://") then
-    url = decrypt_happ_url(url)
+    log("Обнаружена крипто-ссылка: " .. mask_url(url))
+    local decryptor = "/usr/libexec/happ-decrypt"
+    
+    -- Проверяем наличие установленного Go-бинарника дешифратора
+    if not nixio.fs.access(decryptor) then
+        exit_with_error("Дешифратор happ-decrypt не установлен в /usr/libexec/happ-decrypt", "Нет дешифратора")
+    end
+
+    -- Записываем версию бинарника дешифратора в лог
+    local v_handle = io.popen(decryptor .. " --version 2>/dev/null")
+    local dec_ver = v_handle and v_handle:read("*l") or "unknown"
+    if v_handle then v_handle:close() end
+    log("Дешифратор: " .. dec_ver .. "...")
+
+    -- Вызываем Go-бинарник для расшифровки ссылки
+    local cmd = decryptor .. " " .. util.shellquote(url) .. " 2>&1"
+    local p = io.popen(cmd)
+    local out = p:read("*all")
+    p:close()
+
+    -- Ищем расшифрованный URL в выводе дешифратора
+    local real_url = nil
+    for line in out:gmatch("[^\r\n]+") do
+        local u = line:match("^(https?://%S+)")
+        if u then
+            real_url = u
+            break
+        end
+    end
+
+    if not real_url or real_url == "" then
+        exit_with_error("Не удалось расшифровать ссылку: " .. out:gsub("[\r\n]", " "), "Ошибка дешифровки")
+    end
+
+    log("Успешно расшифровано! Истинный URL: " .. mask_url(real_url))
+    url = real_url
 end
 
 log("Запрос: " .. sub_id .. " (" .. mask_url(url) .. ")")
@@ -255,7 +358,7 @@ if not resp_raw or #resp_raw < 3 then
     exit_with_error("Сервер не ответил (сбой сети или таймаут)", "Ошибка сети")
 end
 
--- Отделяем HTTP-код состояния (последние 3 символа из вывода curl) от тела ответа
+-- Отделяем HTTP-код состояния от тела ответа
 local http_code = resp_raw:sub(-3)
 local resp = resp_raw:sub(1, -4)
 
@@ -277,12 +380,12 @@ if b64_dec and (b64_dec:match("://") or b64_dec:match("^%s*{") or b64_dec:match(
     log("Декодирован Base64")
 end
 
--- Проверяем, является ли ответ "сырым" массивом конфигурации (JSON/YAML)
+-- Проверяем, является ли ответ сырым массивом конфигурации (JSON/YAML)
 local is_raw = decoded:match("^%s*{") or decoded:match("^%s*%[") or decoded:match("proxies:")
 
 -- 5. Сохранение полученных узлов в локальный файл для HomeProxy
 if is_raw then
-    -- Сохраняем сырой конфиг как есть (HomeProxy сам разберется с JSON/YAML, если поддерживает)
+    -- Сохраняем сырой конфиг как есть
     if write_to_file(out_path, decoded) then
         log("УСПЕХ: Сохранен как сырой конфиг (JSON/YAML)")
         save_status("JSON/YAML Конфиг")
@@ -293,15 +396,12 @@ else
     -- Парсим обычный текстовый список URI (vless://, vmess://)
     local links = {}
     for line in decoded:gmatch("[^\r\n]+") do
-        -- Убираем пробелы по краям
         line = line:match("^%s*(.-)%s*$")
-        -- Если строка похожа на рабочую ссылку — добавляем в массив
         if line and (line:match("://") or line:match("^happ://")) then 
             table.insert(links, line) 
         end
     end
 
-    -- Если ссылки найдены, сохраняем их в файл, доступный встроенному веб-серверу (uhttpd)
     if #links > 0 then
         if write_to_file(out_path, table.concat(links, "\n") .. "\n") then
             log("УСПЕХ: Найдено " .. #links .. " узлов URI")
@@ -310,7 +410,6 @@ else
             exit_with_error("Не удалось записать файл " .. out_path, "Ошибка записи")
         end
     else
-        -- Если ничего не нашли, логируем начало мусорного ответа
         local snippet = decoded:sub(1, 50):gsub("[%c\n\r]", " ")
         exit_with_error("Узлы не найдены. Начало ответа: " .. snippet, "Пусто (Нет узлов)")
     end
@@ -323,23 +422,18 @@ cat << 'EOF' > /usr/libexec/subconv-cron.sh
 # =====================================================================
 # Скрипт синхронизации расписания Cron для подписок
 # =====================================================================
-# Этот скрипт вызывается LuCI при сохранении настроек подписок.
-# Он читает параметр interval для каждой подписки и создает записи в /etc/crontabs/root.
 
 . /lib/functions.sh
 
-# Удаляем все старые задачи subconv из crontabs
 if [ -f /etc/crontabs/root ]; then
     sed -i '/subconv-update.sh/d' /etc/crontabs/root
 fi
 
-# Функция добавления задачи для конкретной подписки
 add_cron() {
     local cfg="$1"
     local interval
     config_get interval "$cfg" interval "1440"
     
-    # 0 = Отключено
     if [ "$interval" != "0" ]; then
         local cron_expr=""
         case "$interval" in
@@ -546,12 +640,7 @@ local nixio = require "nixio"
 -- Отображает интерфейс, обрабатывает добавление, удаление и обновление.
 -- =====================================================================
 
--- ==========================================
--- Вспомогательные функции для получения системной информации
--- (Необходимы для передачи правильных заголовков Geodema)
--- ==========================================
 local function get_sys_info()
-    -- Парсим версию ОС из /etc/openwrt_release
     local os_ver = "OpenWrt"
     local f_rel = io.open("/etc/openwrt_release", "r")
     if f_rel then
@@ -566,7 +655,6 @@ local function get_sys_info()
         end
     end
 
-    -- Читаем аппаратную модель роутера
     local model = "OpenWrt Router"
     local f_mod = io.open("/tmp/sysinfo/model", "r")
     if f_mod then
@@ -575,7 +663,6 @@ local function get_sys_info()
         if m_val and m_val ~= "" then model = m_val:gsub("^%s+", ""):gsub("%s+$", "") end
     end
 
-    -- Получаем системный Machine ID (уникален для устройства, сохраняется при перезагрузках)
     local hwid = "openwrt-router-default"
     local f_hwid = io.open("/etc/machine-id", "r")
     if f_hwid then
@@ -584,24 +671,20 @@ local function get_sys_info()
         f_hwid:close()
     end
 
-    -- Генерируем случайный HWID на случай, если системный недоступен или не подходит
     local rnd_hwid = sys.exec("cat /proc/sys/kernel/random/uuid 2>/dev/null"):gsub("-", ""):gsub("%s+", ""):sub(1, 16)
     if not rnd_hwid or rnd_hwid == "" then rnd_hwid = "happ" .. tostring(os.time()) end
 
     return os_ver:gsub("[\r\n]", ""), model:gsub("[\r\n]", ""), hwid:gsub("[\r\n]", ""), rnd_hwid:gsub("[\r\n]", "")
 end
 
--- Инициализация системных переменных
 local sys_os, sys_model, sys_hwid, random_hwid = get_sys_info()
 
 -- ==========================================
 -- Константы для HTML и JavaScript
--- (Вынесены отдельно, чтобы не засорять логику Lua)
 -- ==========================================
 local current_ver = "0.3.16"
 
 local title_html = string.format([[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;" id="plugin-ver-text">v%s</span> <button type="button" class="cbi-button" style="margin-left: 10px; font-size: 12px; padding: 2px 6px;" id="btn-check-ver" onclick="checkPluginVersion()">Проверить обновления</button><button type="button" class="cbi-button cbi-button-apply" style="margin-left: 5px; font-size: 12px; padding: 2px 6px; display: none;" id="btn-do-update" onclick="doPluginUpdate()">Обновить</button>]], current_ver)
-
 
 local CSS_TWEAKS = [===[<style>
   /* 1. Выделение и плавная анимация (0.8с) раскрытия формы добавления */
@@ -745,35 +828,48 @@ local CSS_TWEAKS = [===[<style>
     line-height: 18px !important;
   }
 
-  /* 5. ТАБЛИЦА: аккуратные отступы 5px (зазор 10px) и строгая гармония */
+  /* ========================================================= */
+  /* 5. ПОЛНОСТЬЮ ПЕРЕВЕРСТАННАЯ ТАБЛИЦА АКТИВНЫХ ПОДПИСОК      */
+  /* ========================================================= */
   .cbi-section-table {
+    width: 100% !important;
+    max-width: 100% !important;
     table-layout: auto !important;
-    border-collapse: collapse !important;
+    border-collapse: separate !important;
+    border-spacing: 0 !important;
+    box-sizing: border-box !important;
   }
   .cbi-section-table th,
   .cbi-section-table td {
-    padding: 6px 5px !important;
+    padding: 6px 4px !important;
     vertical-align: middle !important;
     text-align: left !important;
     box-sizing: border-box !important;
   }
   .cbi-section-table th {
+    font-size: 12px !important;
+    font-weight: 600 !important;
+    opacity: 0.85 !important;
     white-space: nowrap !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
+  }
+  .cbi-section-table tr.cbi-section-table-row td,
+  .cbi-section-table tr[class*="cbi-section-table-row"] td {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
   }
 
-  /* Интерактивные кликабельные поля (URL, HWID, OS, Модель): обводка и фон только при :hover */
+  /* Интерактивные кликабельные поля: обводка и фон только при :hover */
   .subconv-code-cell {
     display: inline-block !important;
     position: relative !important;
     max-width: 100% !important;
-    padding: 2px 6px !important;
+    padding: 2px 5px !important;
     border-radius: 4px !important;
     border: 1px solid transparent !important;
     background: transparent !important;
     font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace !important;
     font-size: 11px !important;
     line-height: 1.25 !important;
-    word-break: break-all !important;
     cursor: pointer !important;
     transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease !important;
     box-sizing: border-box !important;
@@ -785,37 +881,17 @@ local CSS_TWEAKS = [===[<style>
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15) !important;
   }
 
-  /* Усиленная анимация двоения (ghosting / chromatic duplication) при копировании */
   @keyframes subconvCellGhost {
-    0% {
-      transform: scale(1);
-      box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
-    }
-    20% {
-      transform: scale(1.04);
-      text-shadow: -4px 0 3px rgba(59, 130, 246, 0.95), 4px 0 3px rgba(16, 185, 129, 0.95);
-      box-shadow: -3px 0 0 1px rgba(59, 130, 246, 0.6), 3px 0 0 1px rgba(16, 185, 129, 0.6);
-    }
-    45% {
-      transform: scale(1.03);
-      text-shadow: -5px 0 5px rgba(59, 130, 246, 0.8), 5px 0 5px rgba(16, 185, 129, 0.8);
-      box-shadow: 0 0 14px rgba(16, 185, 129, 0.65);
-    }
-    70% {
-      transform: scale(1.01);
-      text-shadow: -2px 0 2px rgba(59, 130, 246, 0.5), 2px 0 2px rgba(16, 185, 129, 0.5);
-    }
-    100% {
-      transform: scale(1);
-      text-shadow: none;
-      box-shadow: none;
-    }
+    0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+    20% { transform: scale(1.04); text-shadow: -4px 0 3px rgba(59, 130, 246, 0.95), 4px 0 3px rgba(16, 185, 129, 0.95); box-shadow: -3px 0 0 1px rgba(59, 130, 246, 0.6), 3px 0 0 1px rgba(16, 185, 129, 0.6); }
+    45% { transform: scale(1.03); text-shadow: -5px 0 5px rgba(59, 130, 246, 0.8), 5px 0 5px rgba(16, 185, 129, 0.8); box-shadow: 0 0 14px rgba(16, 185, 129, 0.65); }
+    70% { transform: scale(1.01); text-shadow: -2px 0 2px rgba(59, 130, 246, 0.5), 2px 0 2px rgba(16, 185, 129, 0.5); }
+    100% { transform: scale(1); text-shadow: none; box-shadow: none; }
   }
   .subconv-cell-copied {
     animation: subconvCellGhost 0.6s ease-out !important;
   }
 
-  /* Всплывающий бейдж "Скопировано! ✅" прямо над ячейкой */
   .subconv-copied-badge {
     position: absolute !important;
     top: -26px !important;
@@ -849,19 +925,38 @@ local CSS_TWEAKS = [===[<style>
     to { transform: rotate(360deg); }
   }
 
-  /* Кол 2 (User-Agent): ширина 120px, видимые стрелки и всплывающее меню поверх таблицы */
+  /* Кол 1 (URL): комфортный размер без растягивания таблицы */
+  .cbi-section-table th:nth-child(1),
+  .cbi-section-table td:nth-child(1) {
+    min-width: 125px !important;
+    max-width: 165px !important;
+  }
+  .cbi-section-table td:nth-child(1) .subconv-code-cell {
+    word-break: break-all !important;
+  }
+
+  /* Кол 2 (User-Agent Drop-down): строгие 105-115px, видимые стрелки и меню поверх таблицы */
   .cbi-section-table th:nth-child(2),
   .cbi-section-table td:nth-child(2) {
-    width: 120px !important;
+    width: 110px !important;
+    min-width: 100px !important;
+    max-width: 115px !important;
     overflow: visible !important;
   }
+  .cbi-section-table td:nth-child(2) select,
+  .cbi-section-table td:nth-child(2) input,
+  .cbi-section-table td:nth-child(2) .cbi-input-select,
   .cbi-section-table td:nth-child(2) cbi-dropdown,
-  .cbi-section-table td:nth-child(2) .cbi-dropdown,
-  .cbi-section-table td:nth-child(2) select {
-    width: 120px !important;
-    max-width: 120px !important;
+  .cbi-section-table td:nth-child(2) .cbi-dropdown {
+    width: 100% !important;
+    max-width: 110px !important;
+    min-width: 95px !important;
+    height: 28px !important;
+    line-height: 20px !important;
     font-size: 11px !important;
+    padding: 2px 4px !important;
     box-sizing: border-box !important;
+    border-radius: 4px !important;
   }
   .cbi-section-table td:nth-child(2) cbi-dropdown[open],
   .cbi-section-table td:nth-child(2) .cbi-dropdown[open] {
@@ -872,71 +967,112 @@ local CSS_TWEAKS = [===[<style>
   .cbi-section-table td:nth-child(2) .cbi-dropdown > ul:not(.preview) {
     position: absolute !important;
     z-index: 10000 !important;
-    min-width: 140px !important;
-    max-width: 220px !important;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5) !important;
+    min-width: 135px !important;
+    max-width: 200px !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6) !important;
     white-space: normal !important;
   }
 
-  /* Кол 3 (HWID): перенос в 2 строки без полосы прокрутки */
+  /* Кол 3 (HWID): комфортная ширина для переноса по дефису без сплющивания букв */
+  .cbi-section-table th:nth-child(3),
   .cbi-section-table td:nth-child(3) {
-    min-width: 0 !important;
-    white-space: normal !important;
-    line-height: 1.25 !important;
+    width: 125px !important;
+    min-width: 115px !important;
+    max-width: 135px !important;
     font-size: 11px !important;
+    line-height: 1.25 !important;
+  }
+  .cbi-section-table td:nth-child(3) .subconv-code-cell {
+    overflow-wrap: break-word !important;
+    word-break: break-word !important;
   }
 
-  /* Кол 4 (OS): перенос при необходимости в 2 строки */
+  /* Кол 4 (OS): достаточная ширина для 2 строк */
+  .cbi-section-table th:nth-child(4),
   .cbi-section-table td:nth-child(4) {
-    min-width: 0 !important;
-    white-space: normal !important;
-    line-height: 1.25 !important;
+    width: 85px !important;
+    min-width: 80px !important;
+    max-width: 95px !important;
     font-size: 11px !important;
+    line-height: 1.25 !important;
+  }
+  .cbi-section-table td:nth-child(4) .subconv-code-cell {
+    white-space: normal !important;
+    word-break: normal !important;
   }
 
-  /* Кол 5 (Модель): перенос при необходимости в 2 строки */
+  /* Кол 5 (Модель): достаточная ширина для названия устройства */
+  .cbi-section-table th:nth-child(5),
   .cbi-section-table td:nth-child(5) {
-    min-width: 0 !important;
-    white-space: normal !important;
-    line-height: 1.25 !important;
+    width: 95px !important;
+    min-width: 90px !important;
+    max-width: 110px !important;
     font-size: 11px !important;
+    line-height: 1.25 !important;
+  }
+  .cbi-section-table td:nth-child(5) .subconv-code-cell {
+    white-space: normal !important;
+    word-break: normal !important;
   }
 
-  /* Кол 6 (Обновление) и Кол 7 (Тип выдачи) */
+  /* Кол 6 (Обновление): компактный drop-down интервала Cron */
+  .cbi-section-table th:nth-child(6),
+  .cbi-section-table td:nth-child(6) {
+    width: 85px !important;
+    min-width: 80px !important;
+    max-width: 90px !important;
+  }
   .cbi-section-table td:nth-child(6) select,
+  .cbi-section-table td:nth-child(6) .cbi-input-select,
   .cbi-section-table td:nth-child(6) cbi-dropdown,
   .cbi-section-table td:nth-child(6) .cbi-dropdown {
+    width: 100% !important;
+    max-width: 85px !important;
+    min-width: 75px !important;
+    height: 28px !important;
+    line-height: 20px !important;
     font-size: 11px !important;
-  }
-  .cbi-section-table td:nth-child(7) {
-    white-space: normal !important;
-    line-height: 1.25 !important;
-    font-size: 11px !important;
+    padding: 2px 4px !important;
+    box-sizing: border-box !important;
+    border-radius: 4px !important;
   }
 
-  /* Кол 8: Данные подписки (строго 3 строки: название, лимит/срок, остаток) */
+  /* Кол 7 (Тип выдачи): четкий компактный статус */
+  .cbi-section-table th:nth-child(7),
+  .cbi-section-table td:nth-child(7) {
+    width: 90px !important;
+    min-width: 80px !important;
+    max-width: 95px !important;
+    font-size: 11px !important;
+    line-height: 1.25 !important;
+  }
+
+  /* Кол 8: Данные подписки (строго 3 строки без раздувания ширины) */
   .cbi-section-table th:nth-child(8),
   .cbi-section-table td:nth-child(8) {
+    width: 175px !important;
+    min-width: 165px !important;
     white-space: nowrap !important;
-    min-width: 180px !important;
   }
 
-  /* 6. Кнопки действий справа: ПОЛНЫЙ РАЗМЕР */
+  /* 6. Кнопки действий справа: компактные 28x28 */
   .cbi-section-table th:nth-last-child(-n+5),
   .cbi-section-table td:nth-last-child(-n+5) {
-    width: 36px !important;
-    max-width: 40px !important;
-    padding: 4px 2px !important;
+    width: 32px !important;
+    min-width: 32px !important;
+    max-width: 34px !important;
+    padding: 3px 1px !important;
     text-align: center !important;
     white-space: nowrap !important;
   }
   .cbi-section-table td:nth-last-child(-n+5) .cbi-button,
   .cbi-section-table td:nth-last-child(-n+5) a.cbi-button {
-    margin: 0 1px !important;
-    padding: 4px 8px !important;
+    margin: 0 !important;
+    padding: 3px 6px !important;
     font-size: 13px !important;
-    min-width: 30px !important;
-    height: 30px !important;
+    min-width: 28px !important;
+    width: 28px !important;
+    height: 28px !important;
     line-height: 20px !important;
     display: inline-flex !important;
     align-items: center !important;
@@ -995,6 +1131,57 @@ local CSS_TWEAKS = [===[<style>
     background: #10b981 !important;
     box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4) !important;
     transform: translateY(-1px) !important;
+  }
+
+  /* 9. ЖУРНАЛ ОТЛАДКИ: 100% ширина, идеально выровненная со всеми блоками страницы */
+  #cbi-subconv-global,
+  fieldset.cbi-section:has(#subconv-debug-log),
+  fieldset.cbi-section:has(textarea) {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 100% !important;
+    box-sizing: border-box !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+  fieldset.cbi-section:has(#subconv-debug-log) .cbi-section-node,
+  fieldset.cbi-section:has(#subconv-debug-log) .cbi-value,
+  fieldset.cbi-section:has(#subconv-debug-log) .cbi-value-field,
+  .cbi-section:has(#subconv-debug-log) .cbi-value-field,
+  #cbi-subconv-global .cbi-section-node,
+  #cbi-subconv-global .cbi-value,
+  #cbi-subconv-global .cbi-value-field {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 100% !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    box-sizing: border-box !important;
+    display: block !important;
+  }
+  fieldset.cbi-section:has(#subconv-debug-log) .cbi-value-title,
+  #cbi-subconv-global .cbi-value-title {
+    display: none !important;
+  }
+  #subconv-debug-log {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 100% !important;
+    box-sizing: border-box !important;
+    display: block !important;
+    height: 350px !important;
+    background: #1a1b26 !important;
+    color: #a9b1d6 !important;
+    font-family: monospace !important;
+    font-size: 13px !important;
+    padding: 10px !important;
+    border: 1px solid #333 !important;
+    margin-top: 10px !important;
+    border-radius: 4px !important;
   }
 </style>]===]
 
@@ -1100,11 +1287,31 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
         }
     }
 
+    // Асинхронное получение свежих строк журнала отладки без перезагрузки страницы
+    function refreshDebugLog() {
+        var logEl = document.getElementById('subconv-debug-log');
+        if (!logEl) return;
+        fetch('/subconv_debug.txt?_=' + Date.now(), { cache: 'no-store' })
+            .then(function(res) {
+                if (res.ok) return res.text();
+                throw new Error('Not found');
+            })
+            .then(function(text) {
+                if (text && logEl.value !== text) {
+                    var wasAtBottom = (logEl.scrollHeight - logEl.clientHeight <= logEl.scrollTop + 60);
+                    logEl.value = text;
+                    if (wasAtBottom) {
+                        logEl.scrollTop = logEl.scrollHeight;
+                    }
+                }
+            })
+            .catch(function() {});
+    }
+
     function initHeaderAndSections() {
         var subHdr = null;
         var logHdr = null;
 
-        // Удаляем любые лишние заголовки секции добавления (над таблицей)
         document.querySelectorAll('h3, legend').forEach(function(h) {
             if (h.innerText && h.innerText.indexOf('Добавить новую подписку') !== -1) {
                 h.style.setProperty('display', 'none', 'important');
@@ -1114,11 +1321,9 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
             if (h.innerText && h.innerText.indexOf('Журнал отладки') !== -1) logHdr = h;
         });
 
-        // Находим форму добавления подписки (НЕ трогая журнал отладки)
         var addSection = document.querySelector('fieldset:has([name="cbid.subconv.add.sub_id"])') ||
                          document.querySelector('#cbi-subconv-add:not(:has(textarea))');
 
-        // 2. Дешифратор переносим в строку справа от заголовка "Активные подписки"
         var decryptBtn = document.querySelector('[name*="_dl_decrypt"]');
         if (decryptBtn && subHdr) {
             var decryptRow = decryptBtn.closest('.cbi-value');
@@ -1132,7 +1337,6 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
             }
         }
 
-        // 3. Кнопку "Очистить лог" переносим справа от заголовка "Журнал отладки", скрывая саму строку
         var btnClear = document.querySelector('[name*="_clear_log"]');
         if (logHdr && btnClear) {
             var clearRow = btnClear.closest('.cbi-value') || document.querySelector('div[id*="_clear_log"]');
@@ -1140,13 +1344,28 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
             if (btnClear.parentNode !== logHdr) {
                 logHdr.style.display = 'flex';
                 logHdr.style.alignItems = 'center';
-                logHdr.style.gap = '15px';
+                logHdr.style.gap = '10px';
                 btnClear.style.cssText = 'margin: 0; font-size: 12px; padding: 3px 10px; height: 26px; line-height: 18px; cursor: pointer; vertical-align: middle;';
                 logHdr.appendChild(btnClear);
+
+                var btnRefresh = document.getElementById('btn-refresh-log');
+                if (!btnRefresh) {
+                    btnRefresh = document.createElement('button');
+                    btnRefresh.type = 'button';
+                    btnRefresh.id = 'btn-refresh-log';
+                    btnRefresh.className = 'cbi-button cbi-button-apply';
+                    btnRefresh.style.cssText = 'margin: 0; font-size: 12px; padding: 3px 10px; height: 26px; line-height: 18px; cursor: pointer; vertical-align: middle;';
+                    btnRefresh.innerText = '🔄 Обновить лог';
+                    btnRefresh.onclick = function() {
+                        btnRefresh.innerText = '🔄...';
+                        refreshDebugLog();
+                        setTimeout(function() { btnRefresh.innerText = '🔄 Обновить лог'; }, 600);
+                    };
+                    logHdr.appendChild(btnRefresh);
+                }
             }
         }
 
-        // 4. Зеленая кнопка открытия формы в заголовке h2
         if (addSection && !addSection.dataset.spoilerInit) {
             addSection.dataset.spoilerInit = 'true';
             addSection.classList.add('subconv-add-section');
@@ -1192,14 +1411,12 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
     function alignFormAndTable() {
         initHeaderAndSections();
 
-        // Убираем текст (процесс может занять некоторое время), если остался
         document.querySelectorAll('.cbi-section-descr, span').forEach(function(s) {
             if (s.innerText && s.innerText.indexOf('процесс может занять некоторое время') !== -1) {
                 s.remove();
             }
         });
 
-        // Навешиваем обработчики на кликабельные поля (URL, HWID, OS, Модель)
         document.querySelectorAll('.cbi-section-table tbody tr, .cbi-section-table tr.cbi-section-table-row').forEach(function(row) {
             [1, 3, 4, 5].forEach(function(colIdx) {
                 var cell = row.querySelector('td:nth-child(' + colIdx + ')');
@@ -1213,7 +1430,32 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
             });
         });
 
-        // Поля формы: выравниваем строго под 250px и переносим подсказки вправо (ТОЛЬКО для секции добавления)
+        // Выравнивание журнала отладки строго по ширине таблицы (на всю ширину)
+        var logTa = document.getElementById('subconv-debug-log');
+        if (logTa) {
+            var cur = logTa.parentElement;
+            while (cur && cur.tagName !== 'FORM' && cur.tagName !== 'BODY') {
+                if (cur.classList.contains('cbi-value-field') || 
+                    cur.classList.contains('cbi-value') || 
+                    cur.classList.contains('cbi-section-node') ||
+                    cur.tagName === 'FIELDSET') {
+                    cur.style.setProperty('width', '100%%', 'important');
+                    cur.style.setProperty('max-width', '100%%', 'important');
+                    cur.style.setProperty('margin-left', '0', 'important');
+                    cur.style.setProperty('margin-right', '0', 'important');
+                    cur.style.setProperty('padding-left', '0', 'important');
+                    cur.style.setProperty('padding-right', '0', 'important');
+                    cur.style.setProperty('box-sizing', 'border-box', 'important');
+                    cur.style.setProperty('display', 'block', 'important');
+                }
+                var lbl = cur.querySelector('.cbi-value-title');
+                if (lbl && cur.contains(logTa)) {
+                    lbl.style.setProperty('display', 'none', 'important');
+                }
+                cur = cur.parentElement;
+            }
+        }
+
         var addSection = document.querySelector('fieldset:has([name="cbid.subconv.add.sub_id"])') ||
                          document.querySelector('#cbi-subconv-add:not(:has(textarea))');
         if (addSection) {
@@ -1249,7 +1491,6 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
         }
     }
 
-    // Запуск AJAX обновления одной подписки
     function triggerSubUpdate(btn, subId) {
         if (!subId) return;
         if (btn) {
@@ -1266,10 +1507,10 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
         fetch(url, { cache: 'no-store' })
             .catch(function(e) { console.error('Update trigger error', e); });
 
+        refreshDebugLog();
         initStatusWatcher();
     }
 
-    // Запуск AJAX обновления всех подписок
     function triggerUpdateAll(btn) {
         if (btn) {
             btn.disabled = true;
@@ -1293,10 +1534,10 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
         fetch(url, { cache: 'no-store' })
             .catch(function(e) { console.error('Update all trigger error', e); });
 
+        refreshDebugLog();
         initStatusWatcher();
     }
 
-    // Защищенный опрос статуса обновления без зацикливания, без DDoS и БЕЗ перезагрузки страницы
     function initStatusWatcher() {
         if (window.__subconv_watcher_running) return;
         var targets = document.querySelectorAll('.subconv-status-updating');
@@ -1304,12 +1545,17 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
         window.__subconv_watcher_running = true;
 
         var attempts = 0;
-        var maxAttempts = 20; // ~40 секунд максимум
+        var maxAttempts = 20;
         var isRequestPending = false;
         var retryDelay = 2000;
 
+        var logTimer = setInterval(refreshDebugLog, 1500);
+
         function stopWatcher(reason) {
             window.__subconv_watcher_running = false;
+            if (logTimer) { clearInterval(logTimer); logTimer = null; }
+            refreshDebugLog();
+
             var btnAll = document.querySelector('button[onclick*="triggerUpdateAll"]');
             if (btnAll) {
                 btnAll.disabled = false;
@@ -1363,19 +1609,16 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
                         if (data && data[sub]) {
                             var st = data[sub].last_type;
                             if (st && st !== 'Обновление...') {
-                                // 1. Обновляем статус в таблице
                                 var statusCell = document.querySelector('.subconv-status-cell[data-sub="' + sub + '"]');
                                 if (statusCell) {
                                     statusCell.innerHTML = st;
                                 }
 
-                                // 2. Обновляем данные подписки (трафик, дату) в реальном времени
                                 var infoCell = document.querySelector('.subconv-info-cell[data-sub="' + sub + '"]');
                                 if (infoCell && data[sub].info_html) {
                                     infoCell.innerHTML = data[sub].info_html;
                                 }
 
-                                // 3. Возвращаем кнопку обновления в исходное состояние
                                 document.querySelectorAll('button[onclick*="triggerSubUpdate"]').forEach(function(b) {
                                     if (b.getAttribute('onclick').indexOf("'" + sub + "'") !== -1) {
                                         b.disabled = false;
@@ -1387,6 +1630,8 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
                             }
                         }
                     });
+
+                    refreshDebugLog();
 
                     if (!document.querySelectorAll('.subconv-status-updating').length || !stillUpdating) {
                         stopWatcher('done');
@@ -1430,17 +1675,14 @@ local s_add = m:section(NamedSection, "add", "global", "")
 s_add.addremove = false
 s_add.anonymous = true
 
--- Поле ID подписки (используется как имя файла)
 local f_id = s_add:option(Value, "sub_id", translate("Имя подписки (ID)"))
 f_id.description = translate("Только латиница без пробелов. Задает имя выходного файла ({ID}.txt).")
 f_id.rmempty = true
 
--- Поле URL подписки
 local f_url = s_add:option(Value, "url", translate("URL подписки"))
 f_url.description = translate("Прямая ссылка от провайдера (поддерживаются форматы URI, YAML, JSON, happ://crypt5).")
 f_url.rmempty = true
 
--- Поле выбора поддельного User-Agent
 local f_ua = s_add:option(Value, "user_agent", translate("User-Agent"))
 f_ua.description = translate("на основании user agent сервер может адаптировать выдачу")
 f_ua:value("SubConv/1.0", "SubConv/1.0 (По умолчанию)")
@@ -1452,7 +1694,6 @@ f_ua:value("Shadowrocket/1982", "Shadowrocket/1982")
 f_ua.default = "SubConv/1.0"
 f_ua.rmempty = true
 
--- Поле выбора идентификатора HWID (очень важно для провайдера Geodema)
 local f_hwid_opt = s_add:option(Value, "hwid", translate("HWID устройства"))
 f_hwid_opt.description = translate("Уникальный идентификатор устройства. Защищает от блокировки за мультиаккаунт.")
 f_hwid_opt:value(random_hwid, random_hwid .. " (Случайный - По умолчанию)")
@@ -1460,7 +1701,6 @@ f_hwid_opt:value(sys_hwid, sys_hwid .. " (Ваш роутер)")
 f_hwid_opt.default = random_hwid
 f_hwid_opt.rmempty = true
 
--- Поле выбора фейковой ОС
 local f_os = s_add:option(Value, "device_os", translate("OS Устройства"))
 f_os.description = translate("Операционная система, которая будет указана в заголовках запроса.")
 f_os:value(sys_os, sys_os)
@@ -1470,7 +1710,6 @@ f_os:value("Android 14", "Android 14")
 f_os.default = sys_os
 f_os.rmempty = true
 
--- Поле выбора фейковой модели устройства
 local f_model = s_add:option(Value, "device_model", translate("Модель Устройства"))
 f_model.description = translate("Название устройства для передачи провайдеру.")
 f_model:value(sys_model, sys_model)
@@ -1480,7 +1719,6 @@ f_model:value("Android Phone", "Android Phone")
 f_model.default = sys_model
 f_model.rmempty = true
 
--- Выбор интервала автоматического обновления (создает правило в Cron)
 local f_interval = s_add:option(ListValue, "interval", translate("Интервал обновления"))
 f_interval.description = translate("Как часто роутер будет автоматически скачивать свежие узлы (через Cron).")
 f_interval:value("0", translate("Отключено"))
@@ -1491,7 +1729,6 @@ f_interval:value("720", translate("Каждые 12 часов"))
 f_interval:value("1440", translate("Раз в сутки"))
 f_interval.default = "1440"
 
--- Кнопка установки/обновления Go-дешифратора
 local f_decrypt = s_add:option(Button, "_dl_decrypt", translate("Дешифратор happ://"))
 f_decrypt.inputtitle = translate("Скачать / Обновить")
 f_decrypt.inputstyle = "apply"
@@ -1517,14 +1754,12 @@ function f_decrypt.write(self, section)
     http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
--- Скрытое поле, через которое мы внедряем JS-твики (описанные выше)
 local f_js = s_add:option(DummyValue, "_js_tweaks")
 f_js.rawhtml = true
 function f_js.cfgvalue()
     return CSS_TWEAKS .. string.format(JS_TWEAKS_TEMPLATE, current_ver, title_html:gsub("'", "\\'"))
 end
 
--- Основная кнопка добавления подписки
 local btn_add = s_add:option(Button, "_add", "")
 btn_add.inputtitle = translate("➕ Добавить подписку")
 btn_add.inputstyle = "add"
@@ -1533,16 +1768,13 @@ function btn_add.write(self, section)
     local new_url = m:formvalue("cbid.subconv.add.url")
     
     if new_id and new_id ~= "" and new_url and new_url ~= "" then
-        -- Очистка имени от пробелов и спецсимволов
         new_id = string.gsub(new_id, "[^%w_]", "_")
         
-        -- Защита от перезаписи существующих подписок
         if uci:get("subconv", new_id) then
             m.message = "Ошибка: Подписка с именем '" .. new_id .. "' уже существует!"
             return
         end
 
-        -- Сохранение настроек новой подписки в /etc/config/subconv
         uci:section("subconv", "subscription", new_id, {
             url = new_url,
             user_agent = m:formvalue("cbid.subconv.add.user_agent") or "SubConv/1.0",
@@ -1552,12 +1784,10 @@ function btn_add.write(self, section)
             interval = m:formvalue("cbid.subconv.add.interval") or "1440",
             last_type = "Ожидание..."
         })
-        -- Очистка полей ввода в форме
         uci:set("subconv", "add", "sub_id", "")
         uci:set("subconv", "add", "url", "")
         uci:commit("subconv")
         
-        -- Асинхронный запуск скрипта обновления (в фоне)
         sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(new_id) .. " >/dev/null 2>&1 &")
         http.redirect(dsp.build_url("admin", "services", "subconv"))
     end
@@ -1572,7 +1802,7 @@ s_list.anonymous = true
 s_list.addremove = false
 s_list.template = "cbi/tblsection"
 
--- Отображение URL (стандарт токенов GitHub / AWS с лимитом длины до 2 строк)
+-- Кол 1: URL
 local url_list = s_list:option(DummyValue, "url", translate("URL"))
 url_list.rawhtml = true
 function url_list.cfgvalue(self, section)
@@ -1609,16 +1839,22 @@ function url_list.cfgvalue(self, section)
     return string.format('<div class="subconv-code-cell" onclick="copyCell(this, this.getAttribute(\'data-copy\'))" data-copy="%s" title="Нажмите, чтобы скопировать">%s</div>', esc_val, display_val)
 end
 
--- Редактируемое поле: User-Agent
-local ua_list = s_list:option(Value, "user_agent", translate("User-Agent"))
-ua_list.size = "12"
+-- Кол 2: User-Agent (компактный выпадающий список ListValue)
+local ua_list = s_list:option(ListValue, "user_agent", translate("User-Agent"))
 ua_list:value("SubConv/1.0", "SubConv/1.0")
 ua_list:value("sing-box/1.9.3", "sing-box 1.9.3")
 ua_list:value("mihomo/1.18.3", "mihomo 1.18.3")
 ua_list:value("Happ/SC", "Happ/SC")
+ua_list:value("v2rayN/6.42", "v2rayN 6.42")
+ua_list:value("Shadowrocket/1982", "Shadowrocket/1982")
+uci:foreach("subconv", "subscription", function(s)
+    if s.user_agent and s.user_agent ~= "" then
+        ua_list:value(s.user_agent, s.user_agent)
+    end
+end)
 ua_list.rmempty = false
 
--- Просмотр поля: HWID
+-- Кол 3: HWID
 local hwid_opt = s_list:option(DummyValue, "hwid", translate("HWID"))
 hwid_opt.rawhtml = true
 function hwid_opt.cfgvalue(self, section)
@@ -1627,7 +1863,7 @@ function hwid_opt.cfgvalue(self, section)
     return string.format('<div class="subconv-code-cell" onclick="copyCell(this, this.getAttribute(\'data-copy\'))" data-copy="%s" title="Нажмите, чтобы скопировать">%s</div>', esc_val, esc_val)
 end
 
--- Просмотр поля: OS
+-- Кол 4: OS
 local os_opt = s_list:option(DummyValue, "device_os", translate("OS"))
 os_opt.rawhtml = true
 function os_opt.cfgvalue(self, section)
@@ -1636,7 +1872,7 @@ function os_opt.cfgvalue(self, section)
     return string.format('<div class="subconv-code-cell" onclick="copyCell(this, this.getAttribute(\'data-copy\'))" data-copy="%s" title="Нажмите, чтобы скопировать">%s</div>', esc_val, esc_val)
 end
 
--- Просмотр поля: Model
+-- Кол 5: Model
 local model_opt = s_list:option(DummyValue, "device_model", translate("Модель"))
 model_opt.rawhtml = true
 function model_opt.cfgvalue(self, section)
@@ -1645,7 +1881,7 @@ function model_opt.cfgvalue(self, section)
     return string.format('<div class="subconv-code-cell" onclick="copyCell(this, this.getAttribute(\'data-copy\'))" data-copy="%s" title="Нажмите, чтобы скопировать">%s</div>', esc_val, esc_val)
 end
 
--- Редактируемое поле: Интервал обновления Cron
+-- Кол 6: Интервал обновления Cron
 local interval_list = s_list:option(ListValue, "interval", translate("Обновление"))
 interval_list:value("0", translate("Откл"))
 interval_list:value("30", translate("30 мин"))
@@ -1722,7 +1958,7 @@ local function format_sub_info(id, uinfo)
     return string.format([[<div style="line-height: 1.3; white-space: nowrap;"><div style="font-size: 13px; font-weight: bold;">%s</div>%s%s</div>]], id, l2, l3)
 end
 
--- Отображение последнего статуса обработки
+-- Кол 7: Тип выдачи
 local type_opt = s_list:option(DummyValue, "last_type", translate("Тип выдачи"))
 type_opt.rawhtml = true
 function type_opt.cfgvalue(self, section)
@@ -1733,7 +1969,7 @@ function type_opt.cfgvalue(self, section)
     return string.format('<span class="subconv-status-cell" data-sub="%s">%s</span>', section, val)
 end
 
--- Колонка данных подписки (строго 3 строки без раздувания высоты)
+-- Кол 8: Данные подписки
 local link_opt = s_list:option(DummyValue, "_link", translate("Данные подписки"))
 link_opt.rawhtml = true
 function link_opt.cfgvalue(self, section)
@@ -1745,30 +1981,31 @@ end
 local btn_copy_link = s_list:option(DummyValue, "_copy_link", translate(" "))
 btn_copy_link.rawhtml = true
 function btn_copy_link.cfgvalue(self, section)
-    return string.format([[<button type="button" onclick="copySubLink(this, '%s')" class="cbi-button cbi-button-neutral" style="padding: 4px 8px; font-size: 13px; margin: 0 1px; min-width: 30px; height: 30px; line-height: 20px;" title="Скопировать ссылку http://127.0.0.1/%s.txt">🔗</button>]], section, section)
+    return string.format([[<button type="button" onclick="copySubLink(this, '%s')" class="cbi-button cbi-button-neutral" style="padding: 3px 6px; font-size: 13px; margin: 0; min-width: 28px; width: 28px; height: 28px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;" title="Скопировать ссылку http://127.0.0.1/%s.txt">🔗</button>]], section, section)
 end
 
 -- Кнопка [ 🗒️ ]: Открыть готовый файл
 local btn_open_txt = s_list:option(DummyValue, "_open_txt", translate(" "))
 btn_open_txt.rawhtml = true
 function btn_open_txt.cfgvalue(self, section)
-    return string.format([[<a href="/%s.txt" target="_blank" class="cbi-button cbi-button-neutral" style="padding: 4px 8px; font-size: 13px; margin: 0 1px; min-width: 30px; height: 30px; line-height: 20px; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;" title="Открыть готовый файл">🗒️</a>]], section)
+    return string.format([[<a href="/%s.txt" target="_blank" class="cbi-button cbi-button-neutral" style="padding: 3px 6px; font-size: 13px; margin: 0; min-width: 28px; width: 28px; height: 28px; line-height: 20px; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;" title="Открыть готовый файл">🗒️</a>]], section)
 end
 
 -- Кнопка [ 💾 ]: Скачать файл
 local btn_dl_txt = s_list:option(DummyValue, "_dl_txt", translate(" "))
 btn_dl_txt.rawhtml = true
 function btn_dl_txt.cfgvalue(self, section)
-    return string.format([[<a href="/%s.txt" download="%s.txt" class="cbi-button cbi-button-neutral" style="padding: 4px 8px; font-size: 13px; margin: 0 1px; min-width: 30px; height: 30px; line-height: 20px; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;" title="Скачать расшифрованный список (.txt)">💾</a>]], section, section)
+    return string.format([[<a href="/%s.txt" download="%s.txt" class="cbi-button cbi-button-neutral" style="padding: 3px 6px; font-size: 13px; margin: 0; min-width: 28px; width: 28px; height: 28px; line-height: 20px; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;" title="Скачать расшифрованный список (.txt)">💾</a>]], section, section)
 end
+
 -- Кнопка [ 🔄 ]: Обновить подписку (через AJAX без перезагрузки всей страницы)
 local btn_upd_list = s_list:option(DummyValue, "_update", translate(" "))
 btn_upd_list.rawhtml = true
 function btn_upd_list.cfgvalue(self, section)
-    return string.format([[<button type="button" onclick="triggerSubUpdate(this, '%s')" class="cbi-button cbi-button-apply" style="padding: 4px 8px; font-size: 13px; margin: 0 1px; min-width: 30px; height: 30px; line-height: 20px;" title="Обновить подписку">🔄</button>]], section)
+    return string.format([[<button type="button" onclick="triggerSubUpdate(this, '%s')" class="cbi-button cbi-button-apply" style="padding: 3px 6px; font-size: 13px; margin: 0; min-width: 28px; width: 28px; height: 28px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;" title="Обновить подписку">🔄</button>]], section)
 end
 
--- Кнопка удаления подписки (удаляет из конфига и удаляет .txt файл)
+-- Кнопка [ 🗑️ ]: Удаление подписки
 local btn_del_list = s_list:option(Button, "_delete", translate(" "))
 btn_del_list.inputtitle = "🗑️"
 btn_del_list.inputstyle = "remove"
@@ -1804,20 +2041,18 @@ function log_view.cfgvalue(self, section)
     local content = f and f:read("*all") or "Лог пуст. Нажмите 🔄 на любой подписке."
     if f then f:close() end
     content = content:gsub("<", "&lt;"):gsub(">", "&gt;")
-    -- Вывод логов в терминал-подобный блок с автоматической прокруткой вниз
-    return string.format('<textarea readonly wrap="off" style="width: 100%%; height: 350px; background: #1a1b26; color: #a9b1d6; font-family: monospace; font-size: 13px; padding: 10px; border: 1px solid #333; margin-top: 10px;">%s</textarea><script>setTimeout(function(){var t=document.getElementsByTagName("textarea");var l=t[t.length-1];if(l){l.scrollTop=l.scrollHeight;}}, 100);</script>', content)
+    -- Вывод логов в полноразмерный терминал с автопрокруткой вниз
+    return string.format('<textarea id="subconv-debug-log" readonly wrap="off" style="width: 100%%; max-width: 100%%; min-width: 100%%; height: 350px; background: #1a1b26; color: #a9b1d6; font-family: monospace; font-size: 13px; padding: 10px; border: 1px solid #333; margin-top: 10px; box-sizing: border-box; display: block; border-radius: 4px;">%s</textarea><script>setTimeout(function(){var l=document.getElementById("subconv-debug-log");if(l){l.scrollTop=l.scrollHeight;}}, 100);</script>', content)
 end
 
 -- ==========================================
 -- Системные обработчики и события
 -- ==========================================
 
--- После сохранения любых настроек (в том числе интервалов) - перезаписываем Cron-задачи
 function m.on_after_commit(self)
     sys.call("/usr/libexec/subconv-cron.sh")
 end
 
--- Обработчик скрытой формы: "Обновить плагин" (из бейджика в заголовке)
 if http.formvalue("subconv_self_update") == "1" then
     sys.call("curl -fsSL 'https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/install.sh' | sh -s 1 >/dev/null 2>&1 &")
     http.redirect(dsp.build_url("admin", "services", "subconv"))
