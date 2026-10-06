@@ -268,17 +268,18 @@ local function fetch_subscription(url, ua, hwid, dev_os, dev_model, header_outpu
     local tmp_file = "/tmp/sub_resp_" .. (sub_id or "tmp") .. ".bin"
     os.remove(tmp_file)
 
-    -- Формируем команду curl с эмуляцией заголовков клиента
+    -- Формируем команду curl с эмуляцией заголовков клиента (строго по стандарту 0.3.15)
     local cmd = string.format(
-        "curl -s -L -k --connect-timeout 15 -m 30 " ..
-        "-H %s -H %s -H %s -H %s " ..
+        "curl -k -L -s --connect-timeout 15 -m 30 " ..
+        "-A %s " ..
+        "-H %s -H %s -H %s " ..
         "-D %s " ..
         "-w '%%{http_code}' " ..
         "%s -o %s",
-        util.shellquote("User-Agent: " .. ua),
-        util.shellquote("device-hwid: " .. hwid),
-        util.shellquote("device-os: " .. dev_os),
-        util.shellquote("device-model: " .. dev_model),
+        util.shellquote(ua),
+        util.shellquote("X-HWID: " .. hwid),
+        util.shellquote("X-DEVICE-OS: " .. dev_os),
+        util.shellquote("X-DEVICE-MODEL: " .. dev_model),
         util.shellquote(header_output),
         util.shellquote(url),
         util.shellquote(tmp_file)
@@ -437,63 +438,84 @@ else
     end
 end
 
-end -- main
+end
 
--- Страховка: любая непредвиденная ошибка Lua попадает в журнал и в статус подписки,
--- а не оставляет её навсегда в состоянии "Обновление..."
+-- Безопасный запуск с перехватом критических ошибок
 local ok, err = xpcall(main, debug.traceback)
 if not ok then
-    log("КРИТИЧЕСКАЯ ОШИБКА СКРИПТА: " .. tostring(err):gsub("[\r\n]+", " | "))
-    pcall(save_status, "Ошибка скрипта")
+    local err_msg = tostring(err):gsub("\r?\n", " | ")
+    log("КРИТИЧЕСКАЯ ОШИБКА СКРИПТА: " .. err_msg)
+    save_status("Сбой скрипта")
     os.exit(1)
 end
 EOF
+
 chmod +x /usr/libexec/subconv-update.sh
 
 cat << 'EOF' > /usr/libexec/subconv-cron.sh
 #!/bin/sh
 # =====================================================================
-# Скрипт синхронизации расписания Cron для подписок
+# Скрипт синхронизации расписания Cron (subconv-cron.sh)
 # =====================================================================
+# Читает параметры interval из /etc/config/subconv и прописывает
+# автоматические задачи обновления в /etc/crontabs/root.
 
-. /lib/functions.sh
+CRON_FILE="/etc/crontabs/root"
+mkdir -p /etc/crontabs
+touch "$CRON_FILE"
 
-if [ -f /etc/crontabs/root ]; then
-    sed -i '/subconv-update.sh/d' /etc/crontabs/root
+# Удаляем старые задачи subconv перед обновлением расписания
+sed -i '/subconv-update.sh/d' "$CRON_FILE"
+
+if [ -f /etc/config/subconv ]; then
+    SUBS=$(uci show subconv | grep "=subscription" | cut -d'.' -f2 | cut -d'=' -f1)
+    
+    for sub in $SUBS; do
+        if [ -n "$sub" ]; then
+            INTERVAL=$(uci -q get subconv."$sub".interval)
+            
+            # Настройка периодичности запуска в минутах/часах
+            case "$INTERVAL" in
+                "30")
+                    echo "*/30 * * * * /usr/libexec/subconv-update.sh $sub >/dev/null 2>&1" >> "$CRON_FILE"
+                    ;;
+                "60")
+                    echo "0 * * * * /usr/libexec/subconv-update.sh $sub >/dev/null 2>&1" >> "$CRON_FILE"
+                    ;;
+                "360")
+                    echo "0 */6 * * * /usr/libexec/subconv-update.sh $sub >/dev/null 2>&1" >> "$CRON_FILE"
+                    ;;
+                "720")
+                    echo "0 */12 * * * /usr/libexec/subconv-update.sh $sub >/dev/null 2>&1" >> "$CRON_FILE"
+                    ;;
+                "1440")
+                    echo "0 4 * * * /usr/libexec/subconv-update.sh $sub >/dev/null 2>&1" >> "$CRON_FILE"
+                    ;;
+                "0"|"")
+                    # Автообновление отключено
+                    ;;
+            esac
+        fi
+    done
 fi
 
-add_cron() {
-    local cfg="$1"
-    local interval
-    config_get interval "$cfg" interval "1440"
-    
-    if [ "$interval" != "0" ]; then
-        local cron_expr=""
-        case "$interval" in
-            "30")   cron_expr="*/30 * * * *" ;;
-            "60")   cron_expr="0 * * * *" ;;
-            "360")  cron_expr="0 */6 * * *" ;;
-            "720")  cron_expr="0 */12 * * *" ;;
-            "1440") cron_expr="0 4 * * *" ;;
-            *)      cron_expr="0 4 * * *" ;;
-        esac
-        
-        if [ -n "$cron_expr" ]; then echo "$cron_expr /usr/libexec/subconv-update.sh $cfg >/dev/null 2>&1" >> /etc/crontabs/root; fi
-    fi
-}
-config_load subconv
-config_foreach add_cron subscription
-/etc/init.d/cron restart
+/etc/init.d/cron restart >/dev/null 2>&1
 EOF
+
 chmod +x /usr/libexec/subconv-cron.sh
 
 cat << 'EOF' > /usr/share/luci/menu.d/subconv.json
 {
     "admin/services/subconv": {
         "title": "Subconv",
+        "action": {
+            "type": "cbi",
+            "path": "subconv"
+        },
         "order": 90,
-        "action": { "type": "cbi", "path": "subconv" },
-        "depends": { "acl": [ "luci-app-subconv" ] }
+        "depends": {
+            "uci": { "subconv": true }
+        }
     }
 }
 EOF
@@ -514,6 +536,7 @@ function index()
     entry({"admin", "services", "subconv"}, cbi("subconv"), _("Subconv"), 90).dependent = true
     entry({"admin", "services", "subconv", "status"}, call("action_status")).leaf = true
     entry({"admin", "services", "subconv", "update_ajax"}, call("action_update_ajax")).leaf = true
+    entry({"admin", "services", "subconv", "set_param"}, call("action_set_param")).leaf = true
 end
 
 local function format_sub_info(id, uinfo)
@@ -531,60 +554,63 @@ local function format_sub_info(id, uinfo)
             local exp_date = has_exp and os.date("%d.%m.%Y", exp) or "бессрочно"
             local now = os.time()
             local is_expired = has_exp and (exp < now)
-            local days_left = has_exp and math.max(0, math.floor((exp - now) / 86400)) or nil
 
-            local d_str = nil
-            if has_exp then
-                local ld, lt = days_left % 10, days_left % 100
-                if lt >= 11 and lt <= 19 then d_str = days_left .. " дней"
-                elseif ld == 1 then d_str = days_left .. " день"
-                elseif ld >= 2 and ld <= 4 then d_str = days_left .. " дня"
-                else d_str = days_left .. " дней" end
+            if total and total > 0 then
+                local pct = math.min(100, math.floor((used / total) * 100))
+                local bar_color = "#3b82f6"
+                if is_expired then
+                    bar_color = "#9ca3af"
+                elseif pct >= 90 then
+                    bar_color = "#ef4444"
+                elseif pct >= 75 then
+                    bar_color = "#f59e0b"
+                end
+                l2 = string.format(
+                    '<div style="font-size: 11px; margin-bottom: 2px;">' ..
+                    '<b>%s</b> / %s <span style="opacity: 0.6;">(%d%%)</span>' ..
+                    '</div>' ..
+                    '<div style="width: 100%%; background: #374151; border-radius: 3px; height: 5px; overflow: hidden; margin-bottom: 3px;">' ..
+                    '<div style="width: %d%%; background: %s; height: 100%%; transition: width 0.3s;"></div>' ..
+                    '</div>',
+                    fmt_b(used), fmt_b(total), pct, pct, bar_color
+                )
+            elseif used > 0 then
+                l2 = string.format('<div style="font-size: 11px; margin-bottom: 2px;">Использовано: <b>%s</b></div>', fmt_b(used))
             end
 
-            local inf_icon = [[<span style="font-size: 20px; font-weight: bold; line-height: 1; vertical-align: -2px; margin-right: 4px; display: inline-block;">∞</span>]]
-
-            if total > 0 then
-                local left_b = math.max(0, total - used)
-                l2 = string.format([[<div style="font-size: 11px; opacity: 0.9; margin-top: 2px; white-space: nowrap;">%s / %s до %s</div>]], fmt_b(used), fmt_b(total), exp_date)
-                if is_expired then
-                    l3 = [[<div style="font-size: 11px; color: #ff5555; font-weight: bold; margin-top: 1px; white-space: nowrap;">Срок истёк</div>]]
-                elseif left_b <= 0 then
-                    l3 = [[<div style="font-size: 11px; color: #ff5555; font-weight: bold; margin-top: 1px; white-space: nowrap;">Трафик исчерпан</div>]]
-                elseif has_exp then
-                    if days_left == 0 then
-                        l3 = string.format([[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Осталось: %s (истекает сегодня)</div>]], fmt_b(left_b))
-                    else
-                        l3 = string.format([[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Осталось: %s на %s</div>]], fmt_b(left_b), d_str)
-                    end
+            if is_expired then
+                l3 = string.format('<div style="font-size: 10px; color: #ef4444; font-weight: bold;">Истёк (%s)</div>', exp_date)
+            elseif has_exp then
+                local days_left = math.ceil((exp - now) / 86400)
+                if days_left <= 0 then
+                    l3 = string.format('<div style="font-size: 10px; color: #f59e0b; font-weight: bold;">Истекает сегодня (%s)</div>', exp_date)
+                elseif days_left <= 3 then
+                    l3 = string.format('<div style="font-size: 10px; color: #f59e0b;">Осталось %d дн. (до %s)</div>', days_left, exp_date)
                 else
-                    l3 = string.format([[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Осталось: %s</div>]], fmt_b(left_b))
+                    l3 = string.format('<div style="font-size: 10px; opacity: 0.6;">До %s (%d дн.)</div>', exp_date, days_left)
                 end
             else
-                if has_exp then
-                    l2 = string.format([[<div style="font-size: 11px; opacity: 0.9; margin-top: 2px; white-space: nowrap;">%sдо %s</div>]], inf_icon, exp_date)
-                    if is_expired then
-                        l3 = [[<div style="font-size: 11px; color: #ff5555; font-weight: bold; margin-top: 1px; white-space: nowrap;">Срок истёк</div>]]
-                    elseif days_left == 0 then
-                        l3 = [[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Истекает сегодня</div>]]
-                    else
-                        l3 = string.format([[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Осталось: %s</div>]], d_str)
-                    end
-                else
-                    l2 = string.format([[<div style="font-size: 11px; opacity: 0.9; margin-top: 2px; white-space: nowrap;">%sбез ограничений</div>]], inf_icon)
-                    l3 = [[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Бессрочно</div>]]
-                end
+                l3 = '<div style="font-size: 10px; opacity: 0.6;">Срок: бессрочно</div>'
             end
         end
-    else
-        l2 = [[<div style="font-size: 11px; opacity: 0.5; margin-top: 2px; white-space: nowrap;">(нет данных)</div>]]
     end
-    return string.format([[<div style="line-height: 1.3; white-space: nowrap;"><div style="font-size: 13px; font-weight: bold;">%s</div>%s%s</div>]], id, l2, l3)
+
+    local local_link = "http://" .. luci.http.getenv("SERVER_NAME") .. "/" .. id .. ".txt"
+    local esc_link = local_link:gsub('"', '&quot;')
+
+    return string.format(
+        '<div style="line-height: 1.3;">' ..
+        '<div style="font-weight: bold; margin-bottom: 2px;">%s</div>' ..
+        '%s%s' ..
+        '<div class="subconv-code-cell" onclick="copyCell(this, this.getAttribute(\'data-copy\'))" data-copy="%s" title="Нажмите, чтобы скопировать" style="margin-top: 4px; font-size: 11px;">%s</div>' ..
+        '</div>',
+        id, l2, l3, esc_link, esc_link
+    )
 end
 
 function action_status()
-    local nixio = require "nixio"
     local http = require "luci.http"
+    local nixio = require "nixio"
     local cache_file = "/tmp/subconv_status.json"
 
     -- Серверная защита от DDoS / флуда: отдаем кэш из /tmp при повторных запросах чаще 1 сек
@@ -664,6 +690,10 @@ function action_update_ajax()
     end
 
     if sub and sub ~= "" then
+        local ua = http.formvalue("ua")
+        if ua and ua ~= "" then
+            uci:set("subconv", sub, "user_agent", ua)
+        end
         uci:set("subconv", sub, "last_type", "Обновление...")
         uci:commit("subconv")
         sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(sub) .. " >/dev/null 2>&1 &")
@@ -675,467 +705,411 @@ function action_update_ajax()
     http.prepare_content("application/json")
     http.write('{"status":"error","message":"no target"}')
 end
+
+function action_set_param()
+    local http = require "luci.http"
+    local sub = http.formvalue("sub")
+    local key = http.formvalue("key")
+    local val = http.formvalue("val")
+
+    if sub and sub ~= "" and (key == "user_agent" or key == "interval") and val then
+        local u = require("luci.model.uci").cursor()
+        u:set("subconv", sub, key, val)
+        u:commit("subconv")
+
+        if key == "interval" then
+            local sys = require "luci.sys"
+            sys.call("/usr/libexec/subconv-cron.sh")
+        end
+
+        http.prepare_content("application/json")
+        http.write('{"status":"ok"}')
+        return
+    end
+
+    http.prepare_content("application/json")
+    http.write('{"status":"error"}')
+end
 EOF
 
 cat << 'EOF' > /usr/lib/lua/luci/model/cbi/subconv.lua
-local uci = require "luci.model.uci".cursor()
 local sys = require "luci.sys"
-local http = require "luci.http"
-local dsp = require "luci.dispatcher"
+local uci = require "luci.model.uci".cursor()
 local util = require "luci.util"
 local nixio = require "nixio"
+local dsp = require "luci.dispatcher"
+local http = require "luci.http"
 
--- =====================================================================
--- Главный визуальный модуль LuCI (SubConv)
--- Отображает интерфейс, обрабатывает добавление, удаление и обновление.
--- =====================================================================
+-- ---------------------------------------------------------------------
+-- 1. СБОР И ДЕТЕКЦИЯ СИСТЕМНЫХ ДАННЫХ РОУТЕРА
+-- ---------------------------------------------------------------------
 
-local function get_sys_info()
-    local os_ver = "OpenWrt"
-    local f_rel = io.open("/etc/openwrt_release", "r")
-    if f_rel then
-        local c = f_rel:read("*all")
-        f_rel:close()
-        for l in c:gmatch("[^\r\n]+") do
-            if l:match("^DISTRIB_ID=") then os_ver = l:match([=[DISTRIB_ID=['"]?(.-)['"]?$]=]) end
-            if l:match("^DISTRIB_RELEASE=") then
-                local rel = l:match([=[DISTRIB_RELEASE=['"]?(.-)['"]?$]=])
-                if rel then os_ver = os_ver .. " " .. rel end
+-- Автоопределение версии прошивки OpenWrt
+local sys_os = "OpenWrt"
+if nixio.fs.access("/etc/openwrt_release") then
+    for line in io.lines("/etc/openwrt_release") do
+        local id, rel = line:match('DISTRIB_ID=[\'"]?(.-)[\'"]?$'), line:match('DISTRIB_RELEASE=[\'"]?(.-)[\'"]?$')
+        if id then sys_os = id end
+        if rel then sys_os = sys_os .. " " .. rel end
+    end
+end
+
+-- Автоопределение модели устройства
+local sys_model = "OpenWrt Router"
+if nixio.fs.access("/tmp/sysinfo/model") then
+    local f_m = io.open("/tmp/sysinfo/model", "r")
+    if f_m then
+        local m_txt = f_m:read("*l")
+        f_m:close()
+        if m_txt and m_txt ~= "" then sys_model = m_txt end
+    end
+end
+
+-- Получение постоянного уникального идентификатора оборудования (HWID)
+local sys_hwid = ""
+if nixio.fs.access("/etc/machine-id") then
+    local f_hid = io.open("/etc/machine-id", "r")
+    if f_hid then
+        sys_hwid = f_hid:read("*l") or ""
+        f_hid:close()
+    end
+end
+if not sys_hwid or sys_hwid == "" then
+    local rand_hex = nixio.bin.hexencode(nixio.crypto.hash("md5", tostring(os.time()) .. tostring(os.clock())))
+    sys_hwid = string.format("%s-%s-%s-%s", rand_hex:sub(1,8), rand_hex:sub(9,12), rand_hex:sub(13,16), rand_hex:sub(17,28))
+    local f_hid_w = io.open("/etc/machine-id", "w")
+    if f_hid_w then
+        f_hid_w:write(sys_hwid .. "\n")
+        f_hid_w:close()
+    end
+end
+
+-- Генерация динамического случайного HWID
+local rnd_part = nixio.bin.hexencode(nixio.crypto.hash("sha1", tostring(os.time()) .. tostring(math.random(1000, 9999))))
+local random_hwid = string.format("%s-%s-%s", rnd_part:sub(1, 8), rnd_part:sub(9, 12), rnd_part:sub(13, 20))
+
+-- ---------------------------------------------------------------------
+-- 2. СИСТЕМА САМООБНОВЛЕНИЯ ПЛАГИНА (GITHUB RELEASES)
+-- ---------------------------------------------------------------------
+local current_ver = "0.3.16"
+
+-- Обработка клика по кнопке "Обновить плагин"
+if http.formvalue("subconv_self_update") then
+    os.remove("/tmp/subconv_ver_cache")
+    local update_cmd = "curl -fsSL --connect-timeout 10 https://raw.githubusercontent.com/asimoneo/subconv/main/install.sh -o /tmp/subconv_install.sh && sh /tmp/subconv_install.sh -s 1"
+    sys.call(update_cmd)
+    http.redirect(dsp.build_url("admin", "services", "subconv"))
+    return
+end
+
+-- Проверка доступности новой версии через GitHub API (с кэшированием)
+local latest_ver = current_ver
+local has_update = false
+local now = os.time()
+local cache_file = "/tmp/subconv_ver_cache"
+local cache_valid = false
+
+local f_c = io.open(cache_file, "r")
+if f_c then
+    local c_time = tonumber(f_c:read("*l") or 0) or 0
+    local c_ver = f_c:read("*l")
+    f_c:close()
+    if (now - c_time) < 1800 and c_ver and c_ver ~= "" then
+        latest_ver = c_ver
+        cache_valid = true
+    end
+end
+
+if not cache_valid then
+    local ver_cmd = "curl -sSL --connect-timeout 3 -H 'User-Agent: Subconv-Updater' https://api.github.com/repos/asimoneo/subconv/releases/latest 2>/dev/null | grep '\"tag_name\":' | head -n 1 | sed -E 's/.*\"tag_name\":[[:space:]]*\"([^\"]+)\".*/\\1/' | sed 's/^v//'"
+    local p_ver = io.popen(ver_cmd)
+    if p_ver then
+        local net_ver = p_ver:read("*l")
+        p_ver:close()
+        if net_ver and net_ver ~= "" and net_ver:match("^%d+%.%d+%.%d+") then
+            latest_ver = net_ver:match("^%d+%.%d+%.%d+")
+            local f_cw = io.open(cache_file, "w")
+            if f_cw then
+                f_cw:write(now .. "\n" .. latest_ver .. "\n")
+                f_cw:close()
             end
         end
     end
-
-    local model = "OpenWrt Router"
-    local f_mod = io.open("/tmp/sysinfo/model", "r")
-    if f_mod then
-        local m_val = f_mod:read("*all")
-        f_mod:close()
-        if m_val and m_val ~= "" then model = m_val:gsub("^%s+", ""):gsub("%s+$", "") end
-    end
-
-    local hwid = "openwrt-router-default"
-    local f_hwid = io.open("/etc/machine-id", "r")
-    if f_hwid then
-        local hw = f_hwid:read("*all"):gsub("^%s+", ""):gsub("%s+$", "")
-        if hw ~= "" then hwid = hw end
-        f_hwid:close()
-    end
-
-    local rnd_hwid = sys.exec("cat /proc/sys/kernel/random/uuid 2>/dev/null"):gsub("-", ""):gsub("%s+", ""):sub(1, 16)
-    if not rnd_hwid or rnd_hwid == "" then rnd_hwid = "happ" .. tostring(os.time()) end
-
-    return os_ver:gsub("[\r\n]", ""), model:gsub("[\r\n]", ""), hwid:gsub("[\r\n]", ""), rnd_hwid:gsub("[\r\n]", "")
 end
 
-local sys_os, sys_model, sys_hwid, random_hwid = get_sys_info()
+-- Сравнение семантических номеров версий
+local function parse_semver(v)
+    local ma, mi, pa = v:match("^(%d+)%.(%d+)%.(%d+)")
+    return tonumber(ma or 0), tonumber(mi or 0), tonumber(pa or 0)
+end
 
--- ==========================================
--- Константы для HTML и JavaScript
--- ==========================================
-local current_ver = "0.3.16"
+local c_ma, c_mi, c_pa = parse_semver(current_ver)
+local l_ma, l_mi, l_pa = parse_semver(latest_ver)
 
-local title_html = string.format([[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;" id="plugin-ver-text">v%s</span> <button type="button" class="cbi-button" style="margin-left: 10px; font-size: 12px; padding: 2px 6px;" id="btn-check-ver" onclick="checkPluginVersion()">Проверить обновления</button><button type="button" class="cbi-button cbi-button-apply" style="margin-left: 5px; font-size: 12px; padding: 2px 6px; display: none;" id="btn-do-update" onclick="doPluginUpdate()">Обновить</button>]], current_ver)
+if (l_ma > c_ma) or (l_ma == c_ma and l_mi > c_mi) or (l_ma == c_ma and l_mi == c_mi and l_pa > c_pa) then
+    has_update = true
+end
 
+-- Формирование бейджа версии в заголовке
+local title_html = string.format([[
+<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+    <div style="display: flex; align-items: center; gap: 10px;">
+        <span style="font-size: 20px; font-weight: bold;">Subconv</span>
+        <span class="subconv-ver-badge">v%s</span>
+    </div>
+]], current_ver)
+
+if has_update then
+    title_html = title_html .. string.format([[
+    <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="color: #f59e0b; font-size: 13px; font-weight: 500;">Доступно обновление: v%s</span>
+        <button type="button" class="cbi-button cbi-button-apply" style="padding: 2px 10px; font-size: 12px; margin: 0;" onclick="triggerSelfUpdate(this)">🚀 Обновить сейчас</button>
+    </div>
+]], latest_ver)
+end
+title_html = title_html .. "</div>"
+
+-- Чтение журнала отладки для вывода в консоль внизу страницы
+local debug_content = ""
+local dbg_f = io.open("/www/subconv_debug.txt", "r")
+if dbg_f then
+    debug_content = dbg_f:read("*all")
+    dbg_f:close()
+else
+    debug_content = "Журнал отладки пуст."
+end
+
+-- ---------------------------------------------------------------------
+-- 3. СТИЛИ И ИНТЕРФЕЙС (CSS И JS)
+-- ---------------------------------------------------------------------
 local CSS_TWEAKS = [===[<style>
-  /* 1. Выделение и плавная анимация (0.8с) раскрытия формы добавления */
-  .subconv-add-section.expanded,
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]).expanded {
-    max-height: 900px !important;
-    opacity: 1 !important;
-    overflow: visible !important;
-    visibility: visible !important;
-    border: 1px solid rgba(16, 185, 129, 0.45) !important;
-    background: rgba(16, 185, 129, 0.03) !important;
-    border-radius: 8px !important;
-    padding: 15px 20px 20px 20px !important;
-    margin-top: 15px !important;
-    margin-bottom: 25px !important;
-    box-shadow: 0 4px 16px rgba(16, 185, 129, 0.08) !important;
-    transition: max-height 0.8s cubic-bezier(0.4, 0, 0.2, 1),
-                opacity 0.8s ease,
-                padding 0.8s ease,
-                margin 0.8s ease !important;
-  }
-  .subconv-add-section:not(.expanded),
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]):not(.expanded) {
-    max-height: 0 !important;
-    opacity: 0 !important;
-    overflow: hidden !important;
-    padding-top: 0 !important;
-    padding-bottom: 0 !important;
-    margin-top: 0 !important;
-    margin-bottom: 0 !important;
-    border-top-width: 0 !important;
-    border-bottom-width: 0 !important;
-    border-left: 1px solid transparent !important;
-    border-right: 1px solid transparent !important;
-    pointer-events: none !important;
-    visibility: hidden !important;
-    transition: max-height 0.8s cubic-bezier(0.4, 0, 0.2, 1),
-                opacity 0.6s ease,
-                padding 0.8s ease,
-                margin 0.8s ease,
-                visibility 0.8s !important;
-  }
-
-  /* Скрываем дублирующий/внешний заголовок формы */
-  .subconv-add-section h3,
-  .subconv-add-section legend,
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) > h3,
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) > legend {
-    display: none !important;
-  }
-
-  /* 2. Поля формы добавления: единая ширина 250px, подсказки справа */
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field {
-    display: flex !important;
-    flex-direction: row !important;
-    align-items: center !important;
-    gap: 15px !important;
-    flex-wrap: nowrap !important;
-  }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field > input:not(.cbi-button),
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field > select,
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field > .cbi-dropdown,
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field > cbi-dropdown {
-    width: 250px !important;
-    max-width: 250px !important;
-    min-width: 250px !important;
-    flex: 0 0 250px !important;
-    box-sizing: border-box !important;
-  }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-description {
-    margin: 0 !important;
-    padding: 0 !important;
-    opacity: 0.8 !important;
-    font-size: 12px !important;
-    white-space: nowrap !important;
-    flex: 1 1 auto !important;
-  }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-dropdown ul > li {
-    white-space: normal !important;
-    line-height: 1.3 !important;
-  }
-
-  /* 3. Кнопка проверки версии в шапке */
-  #btn-check-ver, #btn-do-update {
-    font-size: 13px !important;
-    padding: 4px 10px !important;
-    height: 30px !important;
-    line-height: 20px !important;
-    box-sizing: border-box !important;
-    vertical-align: middle !important;
-  }
-
-  /* 4. Дешифратор в строке заголовка Активные подписки */
-  #subconv-decrypt-bar {
-    display: inline-flex !important;
-    align-items: center !important;
-    gap: 8px !important;
-    margin: 0 0 0 15px !important;
-    padding: 0 !important;
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    font-size: 13px !important;
-    font-weight: normal !important;
-    vertical-align: middle !important;
-  }
-  #subconv-decrypt-bar::before {
-    content: "|" !important;
-    opacity: 0.3 !important;
-    margin-right: 6px !important;
-    font-weight: normal !important;
-  }
-  #subconv-decrypt-bar .cbi-value-title {
-    width: auto !important;
-    padding: 0 !important;
-    margin: 0 !important;
-    font-size: 13px !important;
-    font-weight: 500 !important;
-    opacity: 0.9 !important;
-    display: inline !important;
-  }
-  #subconv-decrypt-bar .cbi-value-field {
-    display: inline-flex !important;
-    align-items: center !important;
-    gap: 8px !important;
-    width: auto !important;
-    margin: 0 !important;
-    padding: 0 !important;
-  }
-  #subconv-decrypt-bar .cbi-value-description {
-    margin: 0 !important;
-    padding: 0 !important;
-    font-size: 12px !important;
-    white-space: nowrap !important;
-  }
-  #subconv-decrypt-bar .cbi-button {
-    margin: 0 !important;
-    font-size: 12px !important;
-    padding: 3px 10px !important;
-    height: 26px !important;
-    line-height: 18px !important;
-  }
-
-  /* ========================================================= */
-  /* 5. ПОЛНОСТЬЮ ПЕРЕВЕРСТАННАЯ ТАБЛИЦА АКТИВНЫХ ПОДПИСОК      */
-  /* ========================================================= */
-  .cbi-section-table {
+  /* 1. Блок заголовка: выравнивание по левому краю, ширина 100% */
+  .subconv-header {
     width: 100% !important;
     max-width: 100% !important;
-    table-layout: auto !important;
-    border-collapse: separate !important;
-    border-spacing: 0 !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    margin-bottom: 20px !important;
     box-sizing: border-box !important;
+    padding-left: 0 !important;
+  }
+  .subconv-ver-badge {
+    background: #0ea5e9;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 12px;
+    display: inline-block;
+    letter-spacing: 0.5px;
+  }
+
+  /* 2. Спойлер "Добавить новую подписку": по умолчанию свернут */
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]),
+  .subconv-add-section {
+    border-radius: 8px !important;
+    margin-bottom: 24px !important;
+    padding: 0 16px 8px 16px !important;
+    position: relative !important;
+    transition: all 0.25s ease !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+  }
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) > legend,
+  .subconv-add-section > legend {
+    cursor: pointer !important;
+    user-select: none !important;
+    font-size: 15px !important;
+    font-weight: 600 !important;
+    padding: 10px 14px 10px 32px !important;
+    margin-left: -16px !important;
+    margin-right: -16px !important;
+    display: block !important;
+    width: calc(100% + 32px) !important;
+    box-sizing: border-box !important;
+    position: relative !important;
+    border-radius: 8px 8px 0 0 !important;
+  }
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) > legend::before,
+  .subconv-add-section > legend::before {
+    content: "▶" !important;
+    position: absolute !important;
+    left: 14px !important;
+    top: 50% !important;
+    transform: translateY(-50%) !important;
+    font-size: 11px !important;
+    transition: transform 0.2s ease !important;
+    opacity: 0.7 !important;
+  }
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]).expanded > legend::before,
+  .subconv-add-section.expanded > legend::before {
+    transform: translateY(-50%) rotate(90deg) !important;
+  }
+
+  /* 3. Фиксированное позиционирование кнопки дешифратора в углу спойлера */
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .subconv-decrypt-row,
+  .subconv-add-section .subconv-decrypt-row {
+    position: absolute !important;
+    top: 6px !important;
+    right: 14px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    z-index: 10 !important;
+    background: transparent !important;
+  }
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .subconv-decrypt-row .cbi-value-title,
+  .subconv-add-section .subconv-decrypt-row .cbi-value-title {
+    display: none !important;
+  }
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .subconv-decrypt-row .cbi-value-field,
+  .subconv-add-section .subconv-decrypt-row .cbi-value-field {
+    padding: 0 !important;
+    margin: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+  }
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .subconv-decrypt-row .cbi-button,
+  .subconv-add-section .subconv-decrypt-row .cbi-button {
+    height: 28px !important;
+    padding: 2px 10px !important;
+    font-size: 11px !important;
+    margin: 0 !important;
+  }
+
+  /* 4. Выравнивание полей формы спойлера по левому краю */
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-section-node,
+  .subconv-add-section .cbi-section-node {
+    padding-left: 0 !important;
+    margin-left: 0 !important;
+  }
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value,
+  .subconv-add-section .cbi-value {
+    padding-left: 0 !important;
+    margin-left: 0 !important;
+  }
+
+  /* 5. Интерактивные ячейки копирования (URL, HWID и т.д.) */
+  .subconv-code-cell {
+    font-family: monospace;
+    cursor: pointer;
+    display: inline-block;
+    padding: 1px 4px;
+    border-radius: 4px;
+    transition: background 0.15s ease, color 0.15s ease;
+    user-select: all;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: middle;
+  }
+  .subconv-code-cell:hover {
+    background: rgba(14, 165, 233, 0.15);
+    color: #0ea5e9;
+  }
+  .subconv-code-cell.copied {
+    background: rgba(16, 185, 129, 0.25) !important;
+    color: #10b981 !important;
+  }
+
+  /* 6. Таблица активных подписок */
+  .cbi-section-table {
+    table-layout: auto !important;
+    width: 100% !important;
+    border-collapse: collapse !important;
   }
   .cbi-section-table th,
   .cbi-section-table td {
-    padding: 6px 4px !important;
     vertical-align: middle !important;
-    text-align: left !important;
-    box-sizing: border-box !important;
-  }
-  .cbi-section-table th {
-    font-size: 12px !important;
-    font-weight: 600 !important;
-    opacity: 0.85 !important;
+    padding: 7px 6px !important;
     white-space: nowrap !important;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
-  }
-  .cbi-section-table tr.cbi-section-table-row td,
-  .cbi-section-table tr[class*="cbi-section-table-row"] td {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
-  }
-
-  /* Интерактивные кликабельные поля: обводка и фон только при :hover */
-  .subconv-code-cell {
-    display: inline-block !important;
-    position: relative !important;
-    max-width: 100% !important;
-    padding: 2px 5px !important;
-    border-radius: 4px !important;
-    border: 1px solid transparent !important;
-    background: transparent !important;
-    font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace !important;
-    font-size: 11px !important;
-    line-height: 1.25 !important;
-    cursor: pointer !important;
-    transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease !important;
-    box-sizing: border-box !important;
-    user-select: none !important;
-  }
-  .subconv-code-cell:hover {
-    border: 1px solid rgba(125, 125, 125, 0.35) !important;
-    background: rgba(125, 125, 125, 0.12) !important;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15) !important;
-  }
-
-  @keyframes subconvCellGhost {
-    0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
-    20% { transform: scale(1.04); text-shadow: -4px 0 3px rgba(59, 130, 246, 0.95), 4px 0 3px rgba(16, 185, 129, 0.95); box-shadow: -3px 0 0 1px rgba(59, 130, 246, 0.6), 3px 0 0 1px rgba(16, 185, 129, 0.6); }
-    45% { transform: scale(1.03); text-shadow: -5px 0 5px rgba(59, 130, 246, 0.8), 5px 0 5px rgba(16, 185, 129, 0.8); box-shadow: 0 0 14px rgba(16, 185, 129, 0.65); }
-    70% { transform: scale(1.01); text-shadow: -2px 0 2px rgba(59, 130, 246, 0.5), 2px 0 2px rgba(16, 185, 129, 0.5); }
-    100% { transform: scale(1); text-shadow: none; box-shadow: none; }
-  }
-  .subconv-cell-copied {
-    animation: subconvCellGhost 0.6s ease-out !important;
-  }
-
-  .subconv-copied-badge {
-    position: absolute !important;
-    top: -26px !important;
-    left: 50% !important;
-    transform: translateX(-50%) !important;
-    background: #059669 !important;
-    color: #ffffff !important;
-    font-size: 11px !important;
-    font-weight: 600 !important;
-    padding: 2px 8px !important;
-    border-radius: 4px !important;
-    white-space: nowrap !important;
-    pointer-events: none !important;
-    z-index: 1000 !important;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important;
-    animation: subconvBadgeFloat 1.2s ease-out forwards !important;
-  }
-  @keyframes subconvBadgeFloat {
-    0% { opacity: 0; transform: translate(-50%, 4px) scale(0.85); }
-    15% { opacity: 1; transform: translate(-50%, 0) scale(1); }
-    75% { opacity: 1; transform: translate(-50%, -2px) scale(1); }
-    100% { opacity: 0; transform: translate(-50%, -10px) scale(0.9); }
-  }
-
-  .subconv-spin {
-    display: inline-block !important;
-    animation: subconvSpin 1s linear infinite !important;
-  }
-  @keyframes subconvSpin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-
-  /* Кол 1 (URL): комфортный размер без растягивания таблицы */
-  .cbi-section-table th:nth-child(1),
-  .cbi-section-table td:nth-child(1) {
-    min-width: 125px !important;
-    max-width: 165px !important;
-  }
-  .cbi-section-table td:nth-child(1) .subconv-code-cell {
-    word-break: break-all !important;
-  }
-
-  /* Кол 2 (User-Agent): родной выпадающий список LuCI (cbi-dropdown) с возможностью ввести свой вариант.
-     Внешний вид остаётся как в теме OpenWrt, ограничивается только ширина: собственный min-width
-     у cbi-dropdown сбрасывается, иначе колонка раздувается до ~200px. */
-  .cbi-section-table th:nth-child(2),
-  .cbi-section-table td:nth-child(2) {
-    width: 110px !important;
-    min-width: 100px !important;
-    max-width: 115px !important;
-    overflow: visible !important;
-  }
-  .cbi-section-table td:nth-child(2) cbi-dropdown,
-  .cbi-section-table td:nth-child(2) .cbi-dropdown {
-    width: 100% !important;
-    min-width: 0 !important;
-    max-width: 110px !important;
-    box-sizing: border-box !important;
-  }
-  /* Закрытый список: длинный текст обрезается, а не растягивает поле */
-  .cbi-section-table td:nth-child(2) cbi-dropdown:not([open]) > ul,
-  .cbi-section-table td:nth-child(2) .cbi-dropdown:not([open]) > ul {
-    min-width: 0 !important;
-  }
-  .cbi-section-table td:nth-child(2) cbi-dropdown:not([open]) > ul > li,
-  .cbi-section-table td:nth-child(2) .cbi-dropdown:not([open]) > ul > li {
-    min-width: 0 !important;
-    max-width: 100% !important;
     overflow: hidden !important;
     text-overflow: ellipsis !important;
-    white-space: nowrap !important;
-  }
-  /* Открытый список: по ширине самого длинного пункта, чтобы названия читались полностью */
-  .cbi-section-table td:nth-child(2) cbi-dropdown[open] > ul:not(.preview),
-  .cbi-section-table td:nth-child(2) .cbi-dropdown[open] > ul:not(.preview) {
-    min-width: 100% !important;
-    width: max-content !important;
-    max-width: 260px !important;
+    box-sizing: border-box !important;
   }
 
-  /* Кол 3 (HWID): комфортная ширина для переноса по дефису без сплющивания букв */
-  .cbi-section-table th:nth-child(3),
-  .cbi-section-table td:nth-child(3) {
-    width: 125px !important;
-    min-width: 115px !important;
-    max-width: 135px !important;
-    font-size: 11px !important;
-    line-height: 1.25 !important;
-  }
-  .cbi-section-table td:nth-child(3) .subconv-code-cell {
-    overflow-wrap: break-word !important;
-    word-break: break-word !important;
-  }
+  /* Базовая ширина колонок */
+  .cbi-section-table th:nth-child(1), .cbi-section-table td:nth-child(1) { width: 14%; max-width: 130px; }
+  .cbi-section-table th:nth-child(2), .cbi-section-table td:nth-child(2) { width: 15%; max-width: 135px; }
+  .cbi-section-table th:nth-child(3), .cbi-section-table td:nth-child(3) { width: 11%; max-width: 95px; }
+  .cbi-section-table th:nth-child(4), .cbi-section-table td:nth-child(4) { width: 11%; max-width: 95px; }
+  .cbi-section-table th:nth-child(5), .cbi-section-table td:nth-child(5) { width: 11%; max-width: 95px; }
+  .cbi-section-table th:nth-child(6), .cbi-section-table td:nth-child(6) { width: 11%; max-width: 95px; }
+  .cbi-section-table th:nth-child(7), .cbi-section-table td:nth-child(7) { width: 14%; min-width: 110px; }
+  .cbi-section-table th:nth-child(8), .cbi-section-table td:nth-child(8) { width: 13%; min-width: 100px; }
+  .cbi-section-table th:nth-child(9), .cbi-section-table td:nth-child(9) { width: 44px !important; min-width: 44px !important; max-width: 44px !important; text-align: center !important; padding-left: 2px !important; padding-right: 2px !important; }
+  .cbi-section-table th:nth-child(10), .cbi-section-table td:nth-child(10) { width: 44px !important; min-width: 44px !important; max-width: 44px !important; text-align: center !important; padding-left: 2px !important; padding-right: 2px !important; }
 
-  /* Кол 4 (OS): достаточная ширина для 2 строк */
-  .cbi-section-table th:nth-child(4),
-  .cbi-section-table td:nth-child(4) {
-    width: 85px !important;
-    min-width: 80px !important;
-    max-width: 95px !important;
-    font-size: 11px !important;
-    line-height: 1.25 !important;
-  }
-  .cbi-section-table td:nth-child(4) .subconv-code-cell {
-    white-space: normal !important;
-    word-break: normal !important;
-  }
-
-  /* Кол 5 (Модель): достаточная ширина для названия устройства */
-  .cbi-section-table th:nth-child(5),
-  .cbi-section-table td:nth-child(5) {
-    width: 95px !important;
-    min-width: 90px !important;
-    max-width: 110px !important;
-    font-size: 11px !important;
-    line-height: 1.25 !important;
-  }
-  .cbi-section-table td:nth-child(5) .subconv-code-cell {
-    white-space: normal !important;
-    word-break: normal !important;
-  }
-
-  /* Кол 6 (Обновление): компактный drop-down интервала Cron */
-  .cbi-section-table th:nth-child(6),
-  .cbi-section-table td:nth-child(6) {
-    width: 85px !important;
-    min-width: 80px !important;
-    max-width: 90px !important;
-  }
+  /* Нативные выпадающие списки (User-Agent и Cron) */
+  .cbi-section-table td:nth-child(2) select,
+  .cbi-section-table td:nth-child(2) .cbi-dropdown,
   .cbi-section-table td:nth-child(6) select,
-  .cbi-section-table td:nth-child(6) .cbi-input-select,
-  .cbi-section-table td:nth-child(6) cbi-dropdown,
   .cbi-section-table td:nth-child(6) .cbi-dropdown {
     width: 100% !important;
-    max-width: 85px !important;
-    min-width: 75px !important;
-    height: 28px !important;
-    line-height: 20px !important;
-    font-size: 11px !important;
-    padding: 2px 4px !important;
+    max-width: 100% !important;
     box-sizing: border-box !important;
-    border-radius: 4px !important;
-  }
-
-  /* Кол 7 (Тип выдачи): четкий компактный статус */
-  .cbi-section-table th:nth-child(7),
-  .cbi-section-table td:nth-child(7) {
-    width: 90px !important;
-    min-width: 80px !important;
-    max-width: 95px !important;
-    font-size: 11px !important;
-    line-height: 1.25 !important;
-  }
-
-  /* Кол 8: Данные подписки (строго 3 строки без раздувания ширины) */
-  .cbi-section-table th:nth-child(8),
-  .cbi-section-table td:nth-child(8) {
-    width: 175px !important;
-    min-width: 165px !important;
-    white-space: nowrap !important;
-  }
-
-  /* 6. Кнопки действий справа: компактные 28x28 */
-  .cbi-section-table th:nth-last-child(-n+5),
-  .cbi-section-table td:nth-last-child(-n+5) {
-    width: 32px !important;
-    min-width: 32px !important;
-    max-width: 34px !important;
-    padding: 3px 1px !important;
-    text-align: center !important;
-    white-space: nowrap !important;
-  }
-  .cbi-section-table td:nth-last-child(-n+5) .cbi-button,
-  .cbi-section-table td:nth-last-child(-n+5) a.cbi-button {
     margin: 0 !important;
-    padding: 3px 6px !important;
-    font-size: 13px !important;
-    min-width: 28px !important;
-    width: 28px !important;
-    height: 28px !important;
-    line-height: 20px !important;
+    padding-top: 3px !important;
+    padding-bottom: 3px !important;
+    height: 30px !important;
+    line-height: 24px !important;
+    font-size: 12px !important;
+  }
+  .cbi-section-table td:nth-child(2) .cbi-dropdown-entry,
+  .cbi-section-table td:nth-child(6) .cbi-dropdown-entry {
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+    font-size: 12px !important;
+  }
+
+  /* Кнопки действий: компактный квадратный вид с крупными эмодзи */
+  .subconv-action-btn {
     display: inline-flex !important;
     align-items: center !important;
     justify-content: center !important;
+    width: 32px !important;
+    min-width: 32px !important;
+    max-width: 32px !important;
+    height: 32px !important;
+    padding: 0 !important;
+    margin: 0 auto !important;
+    font-size: 16px !important;
+    line-height: 1 !important;
+    border-radius: 6px !important;
+    cursor: pointer !important;
     box-sizing: border-box !important;
+    text-decoration: none !important;
+    transition: transform 0.1s ease, background-color 0.15s ease !important;
+  }
+  .subconv-action-btn:hover {
+    transform: scale(1.08) !important;
+  }
+  .subconv-action-btn:active {
+    transform: scale(0.95) !important;
+  }
+  .subconv-action-btn span {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    height: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    line-height: 1 !important;
   }
 
-  /* 7. Скрываем дублирующую строку кнопки очистки логов и нижнюю панель действий LuCI */
-  div[id*="_clear_log"]:not(button):not(input) {
-    display: none !important;
+  /* 7. Анимация вращения индикатора загрузки */
+  @keyframes subconv-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
-  .cbi-page-actions {
-    display: none !important;
+  .subconv-spin {
+    display: inline-block !important;
+    animation: subconv-spin 1s linear infinite !important;
+    transform-origin: center center !important;
+    line-height: 1 !important;
   }
 
   /* 8. Кнопка "Добавить подписку" по центру внизу формы */
@@ -1189,33 +1163,28 @@ local CSS_TWEAKS = [===[<style>
     opacity: 1 !important;
   }
 
-  /* 9. ЖУРНАЛ ОТЛАДКИ: 100% ширина, идеально выровненная со всеми блоками страницы */
+  /* 9. Журнал отладки: 100% ширина, моноширинный шрифт и автоскролл */
   #cbi-subconv-global,
-  fieldset.cbi-section:has(#subconv-debug-log),
-  fieldset.cbi-section:has(textarea) {
+  fieldset.cbi-section:has(#subconv-debug-log) {
     width: 100% !important;
     max-width: 100% !important;
-    min-width: 100% !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
     box-sizing: border-box !important;
-    margin-left: 0 !important;
-    margin-right: 0 !important;
     padding-left: 0 !important;
     padding-right: 0 !important;
+    display: block !important;
   }
-  fieldset.cbi-section:has(#subconv-debug-log) .cbi-section-node,
-  fieldset.cbi-section:has(#subconv-debug-log) .cbi-value,
-  fieldset.cbi-section:has(#subconv-debug-log) .cbi-value-field,
-  .cbi-section:has(#subconv-debug-log) .cbi-value-field,
   #cbi-subconv-global .cbi-section-node,
+  fieldset.cbi-section:has(#subconv-debug-log) .cbi-section-node,
   #cbi-subconv-global .cbi-value,
-  #cbi-subconv-global .cbi-value-field {
+  fieldset.cbi-section:has(#subconv-debug-log) .cbi-value,
+  #cbi-subconv-global .cbi-value-field,
+  fieldset.cbi-section:has(#subconv-debug-log) .cbi-value-field {
     width: 100% !important;
     max-width: 100% !important;
-    min-width: 100% !important;
-    margin-left: 0 !important;
-    margin-right: 0 !important;
-    padding-left: 0 !important;
-    padding-right: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
     box-sizing: border-box !important;
     display: block !important;
   }
@@ -1225,227 +1194,107 @@ local CSS_TWEAKS = [===[<style>
   #subconv-debug-log {
     width: 100% !important;
     max-width: 100% !important;
-    min-width: 100% !important;
+    height: 180px !important;
     box-sizing: border-box !important;
     display: block !important;
-    height: 350px !important;
-    background: #1a1b26 !important;
-    color: #a9b1d6 !important;
     font-family: monospace !important;
-    font-size: 13px !important;
-    padding: 10px !important;
-    border: 1px solid #333 !important;
-    margin-top: 10px !important;
+    font-size: 11px !important;
+    line-height: 1.4 !important;
+    padding: 8px 10px !important;
     border-radius: 4px !important;
+    resize: vertical !important;
+    white-space: pre !important;
+    overflow-x: auto !important;
+    overflow-y: scroll !important;
   }
-</style>]===]
+</style>
+]===]
 
 local JS_TWEAKS_TEMPLATE = [===[<script>
+(function() {
+    // Вспомогательная функция копирования текста в буфер обмена
+    window.copyCell = function(el, text) {
+        if (!text) return;
+        var toCopy = text.trim();
+        var done = function() {
+            if (el) {
+                var orig = el.innerText;
+                el.classList.add('copied');
+                el.innerText = 'Скопировано!';
+                setTimeout(function() {
+                    el.classList.remove('copied');
+                    el.innerText = orig;
+                }, 1200);
+            }
+        };
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(toCopy).then(done).catch(function() {
+                fallbackCopy(toCopy, done);
+            });
+        } else {
+            fallbackCopy(toCopy, done);
+        }
+    };
+
     function fallbackCopy(text, cb) {
         var ta = document.createElement('textarea');
         ta.value = text;
         ta.style.position = 'fixed';
+        ta.style.top = '0';
+        ta.style.left = '0';
         ta.style.opacity = '0';
         document.body.appendChild(ta);
+        ta.focus();
         ta.select();
-        try { document.execCommand('copy'); } catch(e){}
+        try {
+            document.execCommand('copy');
+            if (cb) cb();
+        } catch(e) {}
         document.body.removeChild(ta);
-        if (cb) cb();
     }
 
-    function copyCell(el, text) {
-        if (!text) text = el.getAttribute('data-copy') || el.innerText;
-        if (!text) return;
-
-        var triggerFeedback = function() {
-            el.classList.remove('subconv-cell-copied');
-            void el.offsetWidth;
-            el.classList.add('subconv-cell-copied');
-            setTimeout(function() {
-                el.classList.remove('subconv-cell-copied');
-            }, 650);
-
-            var oldBadge = el.querySelector('.subconv-copied-badge');
-            if (oldBadge) oldBadge.remove();
-
-            var badge = document.createElement('span');
-            badge.className = 'subconv-copied-badge';
-            badge.innerText = 'Скопировано! ✅';
-            el.appendChild(badge);
-            setTimeout(function() {
-                if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
-            }, 1200);
-        };
-
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text).then(triggerFeedback).catch(function() {
-                fallbackCopy(text, triggerFeedback);
-            });
-        } else {
-            fallbackCopy(text, triggerFeedback);
-        }
-    }
-
-    function copySubLink(btn, subId) {
-        var url = 'http://127.0.0.1/' + subId + '.txt';
-        copyCell(btn, url);
-        btn.innerText = '✅';
-        setTimeout(function() { btn.innerText = '🔗'; }, 1500);
-    }
-
-    function checkPluginVersion() {
-        var btnCheck = document.getElementById('btn-check-ver');
-        if(!btnCheck) return;
-        btnCheck.innerText = 'Проверка...';
-        btnCheck.disabled = true;
-        fetch('https://api.github.com/repos/asimoneo/subconv/commits/main', {cache: 'no-store'})
-            .then(res => res.json())
-            .then(data => {
-                if(!data.sha) throw new Error("No commit");
-                return fetch('https://raw.githubusercontent.com/asimoneo/subconv/' + data.sha + '/install.sh', {cache: 'no-store'});
-            })
-            .then(res => res.text())
-            .then(text => {
-                var match = text.match(/VERSION=["']([^"']+)["']/);
-                if(match) {
-                    var remote = match[1];
-                    var current = '%s';
-                    var verText = document.getElementById('plugin-ver-text');
-                    if(remote !== current) {
-                        verText.innerHTML = 'v' + current + ' &rarr; <b style="color:#ff9800;">v' + remote + '</b>';
-                        var btnUpd = document.getElementById('btn-do-update');
-                        if(btnUpd) btnUpd.style.display = 'inline-block';
-                    } else {
-                        verText.innerHTML = 'v' + current + ' (Актуально)';
-                    }
-                } else {
-                    throw new Error("No VERSION tag");
-                }
-            })
-            .catch(e => {
-                alert('Ошибка проверки версии: ' + e.message);
-            })
-            .finally(() => {
-                btnCheck.innerText = 'Проверить обновления';
-                btnCheck.disabled = false;
-            });
-    }
-
-    function doPluginUpdate() {
-        var hiddenBtn = document.querySelector('#subconv_self_update_btn');
-        if(hiddenBtn) {
-            document.getElementById('btn-do-update').innerText = 'Обновление...';
-            document.getElementById('btn-do-update').disabled = true;
-            hiddenBtn.click();
-        } else {
-            alert('Скрытая кнопка обновления не найдена в DOM');
-        }
-    }
-
-    // Асинхронное получение свежих строк журнала отладки без перезагрузки страницы
-    function refreshDebugLog() {
-        var logEl = document.getElementById('subconv-debug-log');
-        if (!logEl) return;
-        fetch('/subconv_debug.txt?_=' + Date.now(), { cache: 'no-store' })
-            .then(function(res) {
-                if (res.ok) return res.text();
-                throw new Error('Not found');
-            })
-            .then(function(text) {
-                if (text && logEl.value !== text) {
-                    var wasAtBottom = (logEl.scrollHeight - logEl.clientHeight <= logEl.scrollTop + 60);
-                    logEl.value = text;
-                    if (wasAtBottom) {
-                        logEl.scrollTop = logEl.scrollHeight;
-                    }
-                }
-            })
-            .catch(function() {});
-    }
-
+    // Инициализация кастомного заголовка и сворачиваемого спойлера
     function initHeaderAndSections() {
-        var subHdr = null;
-        var logHdr = null;
-
-        document.querySelectorAll('h3, legend').forEach(function(h) {
-            if (h.innerText && h.innerText.indexOf('Добавить новую подписку') !== -1) {
-                h.style.setProperty('display', 'none', 'important');
-                h.remove();
-            }
-            if (h.innerText && h.innerText.indexOf('Активные подписки') !== -1) subHdr = h;
-            if (h.innerText && h.innerText.indexOf('Журнал отладки') !== -1) logHdr = h;
-        });
+        var h2 = document.querySelector('h2');
+        if (h2 && !h2.dataset.subconvInit) {
+            h2.dataset.subconvInit = 'true';
+            h2.classList.add('subconv-header');
+            h2.innerHTML = '%s';
+        }
 
         var addSection = document.querySelector('fieldset:has([name="cbid.subconv.add.sub_id"])') ||
                          document.querySelector('#cbi-subconv-add:not(:has(textarea))');
-
-        var decryptBtn = document.querySelector('[name*="_dl_decrypt"]');
-        if (decryptBtn && subHdr) {
-            var decryptRow = decryptBtn.closest('.cbi-value');
-            if (decryptRow && decryptRow.parentNode !== subHdr) {
-                decryptRow.id = 'subconv-decrypt-bar';
-                subHdr.style.display = 'flex';
-                subHdr.style.alignItems = 'center';
-                subHdr.style.flexWrap = 'wrap';
-                subHdr.style.gap = '12px';
-                subHdr.appendChild(decryptRow);
-            }
-        }
-
-        var btnClear = document.querySelector('[name*="_clear_log"]');
-        if (logHdr && btnClear) {
-            var clearRow = btnClear.closest('.cbi-value') || document.querySelector('div[id*="_clear_log"]');
-            if (clearRow && clearRow !== btnClear) clearRow.style.setProperty('display', 'none', 'important');
-            if (btnClear.parentNode !== logHdr) {
-                logHdr.style.display = 'flex';
-                logHdr.style.alignItems = 'center';
-                logHdr.style.gap = '10px';
-                btnClear.style.cssText = 'margin: 0; font-size: 12px; padding: 3px 10px; height: 26px; line-height: 18px; cursor: pointer; vertical-align: middle;';
-                logHdr.appendChild(btnClear);
-
-                var btnRefresh = document.getElementById('btn-refresh-log');
-                if (!btnRefresh) {
-                    btnRefresh = document.createElement('button');
-                    btnRefresh.type = 'button';
-                    btnRefresh.id = 'btn-refresh-log';
-                    btnRefresh.className = 'cbi-button cbi-button-apply';
-                    btnRefresh.style.cssText = 'margin: 0; font-size: 12px; padding: 3px 10px; height: 26px; line-height: 18px; cursor: pointer; vertical-align: middle;';
-                    btnRefresh.innerText = '🔄 Обновить лог';
-                    btnRefresh.onclick = function() {
-                        btnRefresh.innerText = '🔄...';
-                        refreshDebugLog();
-                        setTimeout(function() { btnRefresh.innerText = '🔄 Обновить лог'; }, 600);
-                    };
-                    logHdr.appendChild(btnRefresh);
-                }
-            }
-        }
-
-        if (addSection && !addSection.dataset.spoilerInit) {
-            addSection.dataset.spoilerInit = 'true';
+        if (addSection) {
             addSection.classList.add('subconv-add-section');
 
-            var btnToggle = document.getElementById('btn-toggle-add-form');
-            if (!btnToggle) {
-                btnToggle = document.createElement('button');
-                btnToggle.type = 'button';
-                btnToggle.id = 'btn-toggle-add-form';
-                btnToggle.style.cssText = 'background: #059669; border: 1px solid #10b981; color: #ffffff; border-radius: 4px; padding: 4px 14px; font-size: 13px; height: 30px; line-height: 20px; margin-left: 12px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; box-sizing: border-box; transition: background 0.2s;';
-                
-                btnToggle.onmouseenter = function() { btnToggle.style.background = '#10b981'; };
-                btnToggle.onmouseleave = function() { btnToggle.style.background = '#059669'; };
-
-                var btnCheck = document.getElementById('btn-check-ver');
-                if (btnCheck && btnCheck.parentNode) {
-                    btnCheck.parentNode.insertBefore(btnToggle, btnCheck.nextSibling);
-                }
+            var dlRow = addSection.querySelector('.cbi-value:has([name*="_dl_decrypt"])');
+            if (dlRow) {
+                dlRow.classList.add('subconv-decrypt-row');
             }
 
             function updateFormVisibility() {
                 var isExp = addSection.classList.contains('expanded');
-                if (btnToggle) {
-                    btnToggle.innerHTML = (isExp ? '▼' : '▶') + ' Добавить новую подписку';
-                }
+                var rows = addSection.querySelectorAll('.cbi-value');
+                rows.forEach(function(r) {
+                    if (r.classList.contains('subconv-decrypt-row')) {
+                        r.style.setProperty('display', 'block', 'important');
+                    } else {
+                        r.style.setProperty('display', isExp ? 'flex' : 'none', 'important');
+                    }
+                });
+            }
+
+            var legend = addSection.querySelector('legend');
+            var btnToggle = addSection.querySelector('.subconv-spoiler-toggle');
+            if (legend && !legend.dataset.spoilerInit) {
+                legend.dataset.spoilerInit = 'true';
+                legend.style.cursor = 'pointer';
+                legend.onclick = function(e) {
+                    if (e.target.closest('.subconv-decrypt-row') || e.target.closest('.cbi-button')) return;
+                    addSection.classList.toggle('expanded');
+                    updateFormVisibility();
+                };
             }
 
             if (btnToggle) {
@@ -1455,16 +1304,148 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
                 };
             }
 
-            if (addSection.querySelector('.cbi-value-error')) {
+            if (addSection.querySelector('.cbi-value-error') || document.querySelector('.cbi-message-reset, .alert-message')) {
                 addSection.classList.add('expanded');
+            }
+
+            var btnSubmitAdd = addSection.querySelector('button[name*="_add"], input[name*="_add"]');
+            if (btnSubmitAdd && !btnSubmitAdd.dataset.valInit) {
+                btnSubmitAdd.dataset.valInit = 'true';
+                btnSubmitAdd.addEventListener('click', function(e) {
+                    var idInp = document.querySelector('[name="cbid.subconv.add.sub_id"]');
+                    var urlInp = document.querySelector('[name="cbid.subconv.add.url"]');
+                    if (!idInp || !urlInp) return;
+
+                    var idVal = (idInp.value || '').trim();
+                    var urlVal = (urlInp.value || '').trim();
+
+                    if (!idVal) {
+                        alert('Ошибка: Укажите имя подписки (ID)!');
+                        idInp.focus();
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return false;
+                    }
+
+                    if (!/^[a-zA-Z0-9_]+$/.test(idVal)) {
+                        alert('Ошибка: Имя подписки (ID) должно содержать только латинские буквы, цифры и знак подчеркивания!');
+                        idInp.focus();
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return false;
+                    }
+
+                    if (idVal === 'add' || idVal === 'global' || idVal === 'subscription') {
+                        alert('Ошибка: Имя "' + idVal + '" зарезервировано системой!');
+                        idInp.focus();
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return false;
+                    }
+
+                    if (document.querySelector('.subconv-info-cell[data-sub="' + idVal + '"]')) {
+                        alert('Ошибка: Подписка с именем "' + idVal + '" уже существует!');
+                        idInp.focus();
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return false;
+                    }
+
+                    if (!urlVal) {
+                        alert('Ошибка: Укажите URL подписки!');
+                        urlInp.focus();
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return false;
+                    }
+
+                    if (/\s/.test(urlVal)) {
+                        alert('Ошибка: URL подписки не должен содержать пробелы!');
+                        urlInp.focus();
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return false;
+                    }
+
+                    if (!/^(https?:\/\/[a-zA-Z0-9.\-_]+|happ:\/\/|v2raytun:\/\/)/i.test(urlVal)) {
+                        alert('Ошибка: Некорректный URL подписки! Ссылка должна начинаться с http://, https://, happ:// или v2raytun://');
+                        urlInp.focus();
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return false;
+                    }
+
+                    var cleanUrl = urlVal.replace(/\/+$/, '').toLowerCase();
+                    var isDup = false;
+                    var dupId = '';
+                    document.querySelectorAll('.cbi-section-table [data-sub-url], .cbi-section-table [data-copy]').forEach(function(el) {
+                        var existing = (el.getAttribute('data-sub-url') || el.getAttribute('data-copy') || '').trim();
+                        if (existing && existing.replace(/\/+$/, '').toLowerCase() === cleanUrl) {
+                            isDup = true;
+                            var row = el.closest('tr');
+                            if (row) {
+                                var sCell = row.querySelector('.subconv-info-cell');
+                                dupId = sCell ? (sCell.getAttribute('data-sub') || '') : '';
+                            }
+                        }
+                    });
+
+                    if (isDup) {
+                        alert('Ошибка: Подписка с таким URL уже добавлена' + (dupId ? ' (ID: ' + dupId + ')' : '') + '!');
+                        urlInp.focus();
+                        e.preventDefault();
+                        e.stopPropagation();
+                        return false;
+                    }
+                }, true);
             }
 
             updateFormVisibility();
         }
     }
 
+    function initTableChangeHandlers() {
+        var table = document.querySelector('.cbi-section-table');
+        if (!table || table.dataset.handlersInit) return;
+        table.dataset.handlersInit = 'true';
+
+        function syncField(target) {
+            if (!target) return;
+            var el = target.closest('[name*="cbid.subconv."]') || target;
+            var name = el.getAttribute('name') || el.name || '';
+            var m = name.match(/^cbid\.subconv\.([^.]+)\.(user_agent|interval)$/);
+            if (!m && target.querySelector) {
+                var real = target.querySelector('[name*="cbid.subconv."]');
+                if (real) {
+                    el = real;
+                    name = el.getAttribute('name') || el.name || '';
+                    m = name.match(/^cbid\.subconv\.([^.]+)\.(user_agent|interval)$/);
+                }
+            }
+            if (m) {
+                var sId = m[1];
+                var key = m[2];
+                var val = el.value !== undefined && el.value !== null ? el.value : el.getAttribute('value');
+                if (val === undefined || val === null || val === '') {
+                    var inner = el.querySelector ? el.querySelector('input, select') : null;
+                    if (inner) val = inner.value;
+                }
+                if (val !== undefined && val !== null) {
+                    var url = window.location.pathname.replace(/\/+$/, '') + '/set_param?sub=' + encodeURIComponent(sId) + '&key=' + encodeURIComponent(key) + '&val=' + encodeURIComponent(val);
+                    fetch(url, { cache: 'no-store' })
+                        .catch(function(e) { console.error('Save param error', e); });
+                }
+            }
+        }
+
+        table.addEventListener('change', function(e) { syncField(e.target); }, true);
+        table.addEventListener('cbi-dropdown-change', function(e) { syncField(e.target); }, true);
+        table.addEventListener('blur', function(e) { syncField(e.target); }, true);
+    }
+
     function alignFormAndTable() {
         initHeaderAndSections();
+        initTableChangeHandlers();
 
         document.querySelectorAll('.cbi-section-descr, span').forEach(function(s) {
             if (s.innerText && s.innerText.indexOf('процесс может занять некоторое время') !== -1) {
@@ -1472,9 +1453,10 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
             }
         });
 
-        document.querySelectorAll('.cbi-section-table tbody tr, .cbi-section-table tr.cbi-section-table-row').forEach(function(row) {
-            [1, 3, 4, 5].forEach(function(colIdx) {
-                var cell = row.querySelector('td:nth-child(' + colIdx + ')');
+        // Настройка ячеек таблицы подписок для клика и копирования
+        document.querySelectorAll('.cbi-section-table tr.cbi-section-table-row').forEach(function(row) {
+            [1, 3, 4, 5].forEach(function(idx) {
+                var cell = row.children[idx - 1];
                 if (cell) {
                     var d = cell.querySelector('.subconv-code-cell') || cell.querySelector('div') || cell;
                     d.title = 'Нажмите, чтобы скопировать';
@@ -1494,8 +1476,8 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
                     cur.classList.contains('cbi-value') || 
                     cur.classList.contains('cbi-section-node') ||
                     cur.tagName === 'FIELDSET') {
-                    cur.style.setProperty('width', '100%%', 'important');
-                    cur.style.setProperty('max-width', '100%%', 'important');
+                    cur.style.setProperty('width', '100%', 'important');
+                    cur.style.setProperty('max-width', '100%', 'important');
                     cur.style.setProperty('margin-left', '0', 'important');
                     cur.style.setProperty('margin-right', '0', 'important');
                     cur.style.setProperty('padding-left', '0', 'important');
@@ -1527,41 +1509,33 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
             }
         }
 
-        var addSection = document.querySelector('fieldset:has([name="cbid.subconv.add.sub_id"])') ||
-                         document.querySelector('#cbi-subconv-add:not(:has(textarea))');
-        if (addSection) {
-            addSection.querySelectorAll('.cbi-value').forEach(function(el) {
-                if (el.id === 'subconv-decrypt-bar' || el.id.indexOf('_clear_log') !== -1 || el.querySelector('textarea')) return;
-                var field = el.querySelector('.cbi-value-field');
-                var desc = el.querySelector('.cbi-value-description');
-                if (field) {
-                    field.style.setProperty('display', 'flex', 'important');
-                    field.style.setProperty('flex-direction', 'row', 'important');
-                    field.style.setProperty('align-items', 'center', 'important');
-                    field.style.gap = '15px';
-                    field.style.setProperty('flex-wrap', 'nowrap', 'important');
-
-                    if (desc) {
-                        field.appendChild(desc);
-                        desc.style.setProperty('margin', '0', 'important');
-                        desc.style.setProperty('opacity', '0.8', 'important');
-                        desc.style.setProperty('font-size', '12px', 'important');
-                        desc.style.setProperty('white-space', 'nowrap', 'important');
-                    }
-
-                    var ctrl = field.querySelector('input:not(.cbi-button), select, .cbi-dropdown, cbi-dropdown') || field.firstElementChild;
-                    if (ctrl && !ctrl.classList.contains('cbi-button')) {
-                        ctrl.style.setProperty('width', '250px', 'important');
-                        ctrl.style.setProperty('max-width', '250px', 'important');
-                        ctrl.style.setProperty('min-width', '250px', 'important');
-                        ctrl.style.setProperty('flex', '0 0 250px', 'important');
-                        ctrl.style.setProperty('box-sizing', 'border-box', 'important');
-                    }
-                }
-            });
+        // Автоскролл консоли логов вниз
+        var dbg = document.getElementById('subconv-debug-log');
+        if (dbg && !dbg.dataset.scrolled) {
+            dbg.scrollTop = dbg.scrollHeight;
+            dbg.dataset.scrolled = 'true';
         }
     }
 
+    // Фоновое обновление содержимого лога отладки без перезагрузки всей страницы
+    function refreshDebugLog() {
+        var logTa = document.getElementById('subconv-debug-log');
+        if (!logTa) return;
+        fetch('/subconv_debug.txt?_t=' + Date.now(), { cache: 'no-store' })
+            .then(function(res) { return res.text(); })
+            .then(function(txt) {
+                if (txt && logTa.value !== txt) {
+                    var shouldScroll = (logTa.scrollTop + logTa.clientHeight >= logTa.scrollHeight - 50);
+                    logTa.value = txt;
+                    if (shouldScroll) {
+                        logTa.scrollTop = logTa.scrollHeight;
+                    }
+                }
+            })
+            .catch(function() {});
+    }
+
+    // Обновление одной подписки через AJAX
     function triggerSubUpdate(btn, subId) {
         if (!subId) return;
         if (btn) {
@@ -1574,7 +1548,28 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
             statusEl.innerHTML = '<span class="subconv-status-updating" data-sub="' + subId + '" style="display:inline-flex; align-items:center; gap:4px; font-weight:500; color:#2563eb;"><span class="subconv-spin">🔄</span> Обновление...</span>';
         }
 
+        var row = btn ? btn.closest('tr') : null;
+        var uaVal = '';
+        if (row) {
+            var uaEl = row.querySelector('[name="cbid.subconv.' + subId + '.user_agent"]') ||
+                       row.querySelector('[name*="' + subId + '.user_agent"]');
+            if (uaEl) {
+                var innerInp = uaEl.querySelector ? uaEl.querySelector('input:not([type="hidden"])') : null;
+                if (innerInp && innerInp.value && innerInp.value !== '-- пользовательский --') {
+                    uaVal = innerInp.value;
+                } else if (uaEl.value !== undefined && uaEl.value !== null && uaEl.value !== '') {
+                    uaVal = uaEl.value;
+                } else {
+                    var anyInp = uaEl.querySelector ? uaEl.querySelector('input, select') : null;
+                    uaVal = anyInp ? anyInp.value : (uaEl.getAttribute('value') || '');
+                }
+            }
+        }
+
         var url = window.location.pathname.replace(/\/+$/, '') + '/update_ajax?sub=' + encodeURIComponent(subId);
+        if (uaVal) {
+            url += '&ua=' + encodeURIComponent(uaVal);
+        }
         fetch(url, { cache: 'no-store' })
             .catch(function(e) { console.error('Update trigger error', e); });
 
@@ -1588,10 +1583,19 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
             btn.innerHTML = '<span class="subconv-spin">🔄</span> Обновление...';
         }
 
-        document.querySelectorAll('button[onclick*="triggerSubUpdate"]').forEach(function(b) {
-            var m = b.getAttribute('onclick').match(/triggerSubUpdate\(this,\s*'([^']+)'\)/);
-            if (m && m[1]) {
-                var sId = m[1];
+        document.querySelectorAll('.subconv-status-cell').forEach(function(el) {
+            var s = el.getAttribute('data-sub');
+            if (s) {
+                el.innerHTML = '<span class="subconv-status-updating" data-sub="' + s + '" style="display:inline-flex; align-items:center; gap:4px; font-weight:500; color:#2563eb;"><span class="subconv-spin">🔄</span> Обновление...</span>';
+            }
+        });
+
+        document.querySelectorAll('.cbi-section-table button[onclick*="triggerSubUpdate"]').forEach(function(b) {
+            b.disabled = true;
+            var sId = '';
+            var m = b.getAttribute('onclick') && b.getAttribute('onclick').match(/triggerSubUpdate\(this,\s*'([^']+)'\)/);
+            if (m) {
+                sId = m[1];
                 b.disabled = true;
                 b.innerHTML = '<span class="subconv-spin">🔄</span>';
                 var sEl = document.querySelector('.subconv-status-cell[data-sub="' + sId + '"]');
@@ -1600,6 +1604,23 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
                 }
             }
         });
+
+        var table = document.querySelector('.cbi-section-table');
+        if (table) {
+            table.querySelectorAll('[name*=".user_agent"]').forEach(function(inp) {
+                var name = inp.name || inp.getAttribute('name') || '';
+                var m = name.match(/^cbid\.subconv\.([^.]+)\.user_agent$/);
+                var val = inp.value !== undefined && inp.value !== null ? inp.value : inp.getAttribute('value');
+                if (!val && inp.querySelector) {
+                    var inner = inp.querySelector('input, select');
+                    if (inner) val = inner.value;
+                }
+                if (m && val) {
+                    var sUrl = window.location.pathname.replace(/\/+$/, '') + '/set_param?sub=' + encodeURIComponent(m[1]) + '&key=user_agent&val=' + encodeURIComponent(val);
+                    fetch(sUrl, { cache: 'no-store' });
+                }
+            });
+        }
 
         var url = window.location.pathname.replace(/\/+$/, '') + '/update_ajax?all=1';
         fetch(url, { cache: 'no-store' })
@@ -1614,6 +1635,7 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
         var targets = document.querySelectorAll('.subconv-status-updating');
         if (!targets.length) return;
         window.__subconv_watcher_running = true;
+
         var attempts = 0;
         // Подписки обновляются по очереди, поэтому время ожидания растёт с их количеством
         var maxAttempts = 20 + 10 * Math.max(0, targets.length - 1);
@@ -1721,15 +1743,6 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
     }
 
     setTimeout(function() {
-        var title = document.querySelector('h2');
-        if(title && title.innerText.includes('Subconv')) {
-            title.innerHTML = '%s';
-        }
-        alignFormAndTable();
-        initStatusWatcher();
-    }, 50);
-
-    setTimeout(function() {
         alignFormAndTable();
         initStatusWatcher();
     }, 200);
@@ -1835,33 +1848,86 @@ local btn_add = s_add:option(Button, "_add", "")
 btn_add.inputtitle = translate("➕ Добавить подписку")
 btn_add.inputstyle = "add"
 function btn_add.write(self, section)
-    local new_id = m:formvalue("cbid.subconv.add.sub_id")
-    local new_url = m:formvalue("cbid.subconv.add.url")
-    
-    if new_id and new_id ~= "" and new_url and new_url ~= "" then
-        new_id = string.gsub(new_id, "[^%w_]", "_")
-        
-        if uci:get("subconv", new_id) then
-            m.message = "Ошибка: Подписка с именем '" .. new_id .. "' уже существует!"
-            return
-        end
+    local raw_id = m:formvalue("cbid.subconv.add.sub_id") or ""
+    local raw_url = m:formvalue("cbid.subconv.add.url") or ""
+    local new_id = raw_id:gsub("^%s+", ""):gsub("%s+$", "")
+    local new_url = raw_url:gsub("^%s+", ""):gsub("%s+$", "")
 
-        uci:section("subconv", "subscription", new_id, {
-            url = new_url,
-            user_agent = m:formvalue("cbid.subconv.add.user_agent") or "SubConv/1.0",
-            hwid = m:formvalue("cbid.subconv.add.hwid") or random_hwid,
-            device_os = m:formvalue("cbid.subconv.add.device_os") or sys_os,
-            device_model = m:formvalue("cbid.subconv.add.device_model") or sys_model,
-            interval = m:formvalue("cbid.subconv.add.interval") or "1440",
-            last_type = "Ожидание..."
-        })
-        uci:set("subconv", "add", "sub_id", "")
-        uci:set("subconv", "add", "url", "")
-        uci:commit("subconv")
-        
-        sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(new_id) .. " >/dev/null 2>&1 &")
-        http.redirect(dsp.build_url("admin", "services", "subconv"))
+    if new_id == "" then
+        m.message = "Ошибка: Укажите имя подписки (ID)!"
+        return
     end
+
+    if not new_id:match("^[%w_]+$") then
+        m.message = "Ошибка: Имя подписки должно содержать только латинские буквы, цифры и знак подчеркивания!"
+        return
+    end
+
+    if new_id == "add" or new_id == "global" or new_id == "subscription" then
+        m.message = "Ошибка: Имя '" .. new_id .. "' зарезервировано системой!"
+        return
+    end
+
+    if uci:get("subconv", new_id) then
+        m.message = "Ошибка: Подписка с именем '" .. new_id .. "' уже существует!"
+        return
+    end
+
+    if new_url == "" then
+        m.message = "Ошибка: Укажите URL подписки!"
+        return
+    end
+
+    if new_url:match("%s") or new_url:match("[\r\n]") then
+        m.message = "Ошибка: URL подписки не должен содержать пробелы и переносы строк!"
+        return
+    end
+
+    -- Проверка протокола и формата URL: поддерживаются http://, https://, happ://, v2raytun://
+    local is_http = new_url:match("^https?://[%w%.%-%_]+%S*")
+    local is_happ = new_url:match("^happ://%S+")
+    local is_v2t  = new_url:match("^v2raytun://%S+")
+    if not (is_http or is_happ or is_v2t) then
+        m.message = "Ошибка: Некорректный URL подписки! Ссылка должна начинаться с http://, https:// или happ://"
+        return
+    end
+
+    -- Проверка на дубликат URL
+    local dup_sub = nil
+    local norm_new_url = new_url:gsub("/+$", "")
+    uci:foreach("subconv", "subscription", function(s)
+        local cur_u = (s.url or ""):gsub("^%s+", ""):gsub("%s+$", ""):gsub("/+$", "")
+        if cur_u ~= "" and cur_u == norm_new_url then
+            dup_sub = s[".name"] or "существующая"
+        end
+    end)
+
+    if dup_sub then
+        m.message = "Ошибка: Подписка с таким URL уже существует (ID: " .. dup_sub .. ")!"
+        return
+    end
+
+    local new_ua = m:formvalue("cbid.subconv.add.user_agent") or "SubConv/1.0"
+    local new_hwid = m:formvalue("cbid.subconv.add.hwid") or random_hwid
+    local new_os = m:formvalue("cbid.subconv.add.device_os") or sys_os
+    local new_model = m:formvalue("cbid.subconv.add.device_model") or sys_model
+    local new_interval = m:formvalue("cbid.subconv.add.interval") or "1440"
+
+    uci:section("subconv", "subscription", new_id, {
+        url = new_url,
+        user_agent = new_ua,
+        hwid = new_hwid,
+        device_os = new_os,
+        device_model = new_model,
+        interval = new_interval,
+        last_type = "Ожидание..."
+    })
+    uci:set("subconv", "add", "sub_id", "")
+    uci:set("subconv", "add", "url", "")
+    uci:commit("subconv")
+    
+    sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(new_id) .. " >/dev/null 2>&1 &")
+    http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
 -- ------------------------------------------
@@ -1907,7 +1973,7 @@ function url_list.cfgvalue(self, section)
     end
     display_val = display_val:gsub('"', '&quot;')
 
-    return string.format('<div class="subconv-code-cell" onclick="copyCell(this, this.getAttribute(\'data-copy\'))" data-copy="%s" title="Нажмите, чтобы скопировать">%s</div>', esc_val, display_val)
+    return string.format('<div class="subconv-code-cell" onclick="copyCell(this, this.getAttribute(\'data-copy\'))" data-copy="%s" data-sub-url="%s" title="Нажмите, чтобы скопировать">%s</div>', esc_val, esc_val, display_val)
 end
 
 -- Кол 2: User-Agent (родной выпадающий список LuCI с возможностью ввести свой вариант)
@@ -1918,11 +1984,6 @@ ua_list:value("mihomo/1.18.3", "mihomo 1.18.3 (Clash.Meta)")
 ua_list:value("Happ/SC", "Happ/SC")
 ua_list:value("v2rayN/6.42", "v2rayN 6.42")
 ua_list:value("Shadowrocket/1982", "Shadowrocket/1982")
-uci:foreach("subconv", "subscription", function(s)
-    if s.user_agent and s.user_agent ~= "" then
-        ua_list:value(s.user_agent, s.user_agent)
-    end
-end)
 ua_list.rmempty = false
 
 -- Кол 3: HWID
@@ -1943,7 +2004,7 @@ function os_opt.cfgvalue(self, section)
     return string.format('<div class="subconv-code-cell" onclick="copyCell(this, this.getAttribute(\'data-copy\'))" data-copy="%s" title="Нажмите, чтобы скопировать">%s</div>', esc_val, esc_val)
 end
 
--- Кол 5: Model
+-- Кол 5: Модель
 local model_opt = s_list:option(DummyValue, "device_model", translate("Модель"))
 model_opt.rawhtml = true
 function model_opt.cfgvalue(self, section)
@@ -1960,185 +2021,96 @@ interval_list:value("60", translate("1 час"))
 interval_list:value("360", translate("6 часов"))
 interval_list:value("720", translate("12 часов"))
 interval_list:value("1440", translate("24 часа"))
-interval_list.rmempty = false
-
--- Вспомогательная функция форматирования данных подписки
-local function format_sub_info(id, uinfo)
-    local l2, l3 = "", ""
-    if uinfo and uinfo ~= "" then
-        local used, total, exp = uinfo:match("^(%d+)|(%d+)|(%d+)$")
-        if used and total and exp then
-            used, total, exp = tonumber(used), tonumber(total), tonumber(exp)
-            local function fmt_b(b)
-                if b >= 1073741824 then return string.format("%.1f ГБ", b / 1073741824)
-                elseif b >= 1048576 then return string.format("%.1f МБ", b / 1048576)
-                else return string.format("%.1f КБ", b / 1024) end
-            end
-            local has_exp = (exp and exp > 0)
-            local exp_date = has_exp and os.date("%d.%m.%Y", exp) or "бессрочно"
-            local now = os.time()
-            local is_expired = has_exp and (exp < now)
-            local days_left = has_exp and math.max(0, math.floor((exp - now) / 86400)) or nil
-
-            local d_str = nil
-            if has_exp then
-                local ld, lt = days_left % 10, days_left % 100
-                if lt >= 11 and lt <= 19 then d_str = days_left .. " дней"
-                elseif ld == 1 then d_str = days_left .. " день"
-                elseif ld >= 2 and ld <= 4 then d_str = days_left .. " дня"
-                else d_str = days_left .. " дней" end
-            end
-
-            local inf_icon = [[<span style="font-size: 20px; font-weight: bold; line-height: 1; vertical-align: -2px; margin-right: 4px; display: inline-block;">∞</span>]]
-
-            if total > 0 then
-                local left_b = math.max(0, total - used)
-                l2 = string.format([[<div style="font-size: 11px; opacity: 0.9; margin-top: 2px; white-space: nowrap;">%s / %s до %s</div>]], fmt_b(used), fmt_b(total), exp_date)
-                if is_expired then
-                    l3 = [[<div style="font-size: 11px; color: #ff5555; font-weight: bold; margin-top: 1px; white-space: nowrap;">Срок истёк</div>]]
-                elseif left_b <= 0 then
-                    l3 = [[<div style="font-size: 11px; color: #ff5555; font-weight: bold; margin-top: 1px; white-space: nowrap;">Трафик исчерпан</div>]]
-                elseif has_exp then
-                    if days_left == 0 then
-                        l3 = string.format([[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Осталось: %s (истекает сегодня)</div>]], fmt_b(left_b))
-                    else
-                        l3 = string.format([[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Осталось: %s на %s</div>]], fmt_b(left_b), d_str)
-                    end
-                else
-                    l3 = string.format([[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Осталось: %s</div>]], fmt_b(left_b))
-                end
-            else
-                if has_exp then
-                    l2 = string.format([[<div style="font-size: 11px; opacity: 0.9; margin-top: 2px; white-space: nowrap;">%sдо %s</div>]], inf_icon, exp_date)
-                    if is_expired then
-                        l3 = [[<div style="font-size: 11px; color: #ff5555; font-weight: bold; margin-top: 1px; white-space: nowrap;">Срок истёк</div>]]
-                    elseif days_left == 0 then
-                        l3 = [[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Истекает сегодня</div>]]
-                    else
-                        l3 = string.format([[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Осталось: %s</div>]], d_str)
-                    end
-                else
-                    l2 = string.format([[<div style="font-size: 11px; opacity: 0.9; margin-top: 2px; white-space: nowrap;">%sбез ограничений</div>]], inf_icon)
-                    l3 = [[<div style="font-size: 11px; opacity: 0.8; margin-top: 1px; white-space: nowrap;">Бессрочно</div>]]
-                end
-            end
-        end
-    else
-        l2 = [[<div style="font-size: 11px; opacity: 0.5; margin-top: 2px; white-space: nowrap;">(нет данных)</div>]]
-    end
-    return string.format([[<div style="line-height: 1.3; white-space: nowrap;"><div style="font-size: 13px; font-weight: bold;">%s</div>%s%s</div>]], id, l2, l3)
+interval_list.default = "1440"
+function interval_list.write(self, section, value)
+    uci:set("subconv", section, "interval", value)
+    uci:commit("subconv")
+    sys.call("/usr/libexec/subconv-cron.sh")
 end
 
--- Кол 7: Тип выдачи
-local type_opt = s_list:option(DummyValue, "last_type", translate("Тип выдачи"))
-type_opt.rawhtml = true
-function type_opt.cfgvalue(self, section)
-    local val = uci:get("subconv", section, "last_type") or "Ожидание..."
-    if val == "Обновление..." then
-        return string.format('<span class="subconv-status-cell subconv-status-updating" data-sub="%s" style="display:inline-flex; align-items:center; gap:4px; font-weight:500; color:#2563eb;"><span class="subconv-spin">🔄</span> Обновление...</span>', section)
+-- Кол 7: Статус последней операции
+local last_status = s_list:option(DummyValue, "last_type", translate("Статус"))
+last_status.rawhtml = true
+function last_status.cfgvalue(self, section)
+    local st = uci:get("subconv", section, "last_type") or "Ожидание..."
+    if st == "Обновление..." then
+        return string.format('<span class="subconv-status-cell" data-sub="%s"><span class="subconv-status-updating" data-sub="%s" style="display:inline-flex; align-items:center; gap:4px; font-weight:500; color:#2563eb;"><span class="subconv-spin">🔄</span> Обновление...</span></span>', section, section)
     end
-    return string.format('<span class="subconv-status-cell" data-sub="%s">%s</span>', section, val)
+    return string.format('<span class="subconv-status-cell" data-sub="%s">%s</span>', section, st)
 end
 
--- Кол 8: Данные подписки
-local link_opt = s_list:option(DummyValue, "_link", translate("Данные подписки"))
-link_opt.rawhtml = true
-function link_opt.cfgvalue(self, section)
+-- Кол 8: Имя / Данные тарифа / Ссылка
+local info_col = s_list:option(DummyValue, "_info", translate("Данные подписки"))
+info_col.rawhtml = true
+function info_col.cfgvalue(self, section)
     local uinfo = uci:get("subconv", section, "userinfo")
     return string.format('<span class="subconv-info-cell" data-sub="%s">%s</span>', section, format_sub_info(section, uinfo))
 end
 
--- Кнопка [ 🔗 ]: Скопировать ссылку
-local btn_copy_link = s_list:option(DummyValue, "_copy_link", translate(" "))
-btn_copy_link.rawhtml = true
-function btn_copy_link.cfgvalue(self, section)
-    return string.format([[<button type="button" onclick="copySubLink(this, '%s')" class="cbi-button cbi-button-neutral" style="padding: 3px 6px; font-size: 13px; margin: 0; min-width: 28px; width: 28px; height: 28px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;" title="Скопировать ссылку http://127.0.0.1/%s.txt">🔗</button>]], section, section)
+-- Кол 9: Кнопка обновления одной подписки
+local btn_upd = s_list:option(DummyValue, "_btn_update", "")
+btn_upd.rawhtml = true
+function btn_upd.cfgvalue(self, section)
+    return string.format('<button type="button" class="cbi-button cbi-button-apply subconv-action-btn" title="Обновить сейчас" onclick="triggerSubUpdate(this, \'%s\')"><span>🔄</span></button>', section)
 end
 
--- Кнопка [ 🗒️ ]: Открыть готовый файл
-local btn_open_txt = s_list:option(DummyValue, "_open_txt", translate(" "))
-btn_open_txt.rawhtml = true
-function btn_open_txt.cfgvalue(self, section)
-    return string.format([[<a href="/%s.txt" target="_blank" class="cbi-button cbi-button-neutral" style="padding: 3px 6px; font-size: 13px; margin: 0; min-width: 28px; width: 28px; height: 28px; line-height: 20px; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;" title="Открыть готовый файл">🗒️</a>]], section)
+-- Кол 10: Кнопка удаления подписки
+local btn_del = s_list:option(Button, "_del", "")
+btn_del.inputtitle = "🗑️"
+btn_del.inputstyle = "reset subconv-action-btn"
+function btn_del.render(self, section, scope)
+    self.title = ""
+    Button.render(self, section, scope)
 end
-
--- Кнопка [ 💾 ]: Скачать файл
-local btn_dl_txt = s_list:option(DummyValue, "_dl_txt", translate(" "))
-btn_dl_txt.rawhtml = true
-function btn_dl_txt.cfgvalue(self, section)
-    return string.format([[<a href="/%s.txt" download="%s.txt" class="cbi-button cbi-button-neutral" style="padding: 3px 6px; font-size: 13px; margin: 0; min-width: 28px; width: 28px; height: 28px; line-height: 20px; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;" title="Скачать расшифрованный список (.txt)">💾</a>]], section, section)
-end
-
--- Кнопка [ 🔄 ]: Обновить подписку (через AJAX без перезагрузки всей страницы)
-local btn_upd_list = s_list:option(DummyValue, "_update", translate(" "))
-btn_upd_list.rawhtml = true
-function btn_upd_list.cfgvalue(self, section)
-    return string.format([[<button type="button" onclick="triggerSubUpdate(this, '%s')" class="cbi-button cbi-button-apply" style="padding: 3px 6px; font-size: 13px; margin: 0; min-width: 28px; width: 28px; height: 28px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box;" title="Обновить подписку">🔄</button>]], section)
-end
-
--- Кнопка [ 🗑️ ]: Удаление подписки
-local btn_del_list = s_list:option(Button, "_delete", translate(" "))
-btn_del_list.inputtitle = "🗑️"
-btn_del_list.inputstyle = "remove"
-function btn_del_list.write(self, section)
-    os.execute("rm -f " .. util.shellquote("/www/" .. section .. ".txt"))
+function btn_del.write(self, section)
     uci:delete("subconv", section)
     uci:commit("subconv")
-    http.redirect(dsp.build_url("admin", "services", "subconv"))
-end
-
--- ------------------------------------------
--- СЕКЦИЯ 3: Журнал отладки (Debug Log)
--- ------------------------------------------
-local s_log = m:section(TypedSection, "global", translate("Журнал отладки"))
-s_log.anonymous = true
-s_log.addremove = false
-function s_log.filter(self, section) return section == "add" end
-
--- Кнопка очистки логов
-local btn_clear = s_log:option(Button, "_clear_log", "")
-btn_clear.inputtitle = translate("Очистить лог")
-btn_clear.inputstyle = "remove"
-function btn_clear.write(self, section)
-    os.execute("rm -f /www/subconv_debug.txt")
-    http.redirect(dsp.build_url("admin", "services", "subconv"))
-end
-
--- Просмотрщик логов (читает файл /www/subconv_debug.txt)
-local log_view = s_log:option(DummyValue, "_logview")
-log_view.rawhtml = true
-function log_view.cfgvalue(self, section)
-    local f = io.open("/www/subconv_debug.txt", "r")
-    local content = f and f:read("*all") or "Лог пуст. Нажмите 🔄 на любой подписке."
-    if f then f:close() end
-    content = content:gsub("<", "&lt;"):gsub(">", "&gt;")
-    -- Вывод логов в полноразмерный терминал с автопрокруткой вниз
-    return string.format('<textarea id="subconv-debug-log" readonly wrap="off" style="width: 100%%; max-width: 100%%; min-width: 100%%; height: 350px; background: #1a1b26; color: #a9b1d6; font-family: monospace; font-size: 13px; padding: 10px; border: 1px solid #333; margin-top: 10px; box-sizing: border-box; display: block; border-radius: 4px;">%s</textarea><script>setTimeout(function(){var l=document.getElementById("subconv-debug-log");if(l){l.scrollTop=l.scrollHeight;}}, 100);</script>', content)
-end
-
--- ==========================================
--- Системные обработчики и события
--- ==========================================
-
-function m.on_after_commit(self)
+    os.remove("/www/" .. section .. ".txt")
     sys.call("/usr/libexec/subconv-cron.sh")
+    http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
-if http.formvalue("subconv_self_update") == "1" then
-    sys.call("curl -fsSL 'https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/install.sh' | sh -s 1 >/dev/null 2>&1 &")
-    http.redirect(dsp.build_url("admin", "services", "subconv"))
+-- ------------------------------------------
+-- СЕКЦИЯ 3: Журнал отладки
+-- ------------------------------------------
+local s_dbg = m:section(NamedSection, "global", "global", translate("Журнал отладки"))
+s_dbg.anonymous = true
+local f_dbg_view = s_dbg:option(TextValue, "_debug_log")
+f_dbg_view.rows = 8
+f_dbg_view.readonly = true
+f_dbg_view.wrap = "off"
+function f_dbg_view.cfgvalue()
+    local f = io.open("/www/subconv_debug.txt", "r")
+    if f then
+        local c = f:read("*all")
+        f:close()
+        return c
+    end
+    return "Журнал отладки пуст."
+end
+function f_dbg_view.render(self, section, scope)
+    self.template = "cbi/tvalue"
+    self.id = "subconv-debug-log"
+    TextValue.render(self, section, scope)
 end
 
 return m
 EOF
-sed -i "s/local current_ver = \".*\"/local current_ver = \"$VERSION\"/" /usr/lib/lua/luci/model/cbi/subconv.lua
 
+# Инициализация конфигурационного файла по умолчанию, если он отсутствует
 if [ ! -f /etc/config/subconv ]; then
-    echo "config global 'add'" > /etc/config/subconv
-elif ! grep -q "config global 'add'" /etc/config/subconv; then
-    echo "config global 'add'" >> /etc/config/subconv
+    touch /etc/config/subconv
+    uci set subconv.global=global
+    uci set subconv.add=global
+    uci commit subconv
 fi
 
+# Настройка сервиса и синхронизация cron
+/usr/libexec/subconv-cron.sh
 rm -rf /tmp/luci-* /tmp/rpcd-* /tmp/state/*
 /etc/init.d/rpcd restart
-echo "✅ Установка завершена!"
+
+echo ""
+echo "======================================================"
+echo "          Subconv v${VERSION} успешно установлен!        "
+echo "======================================================"
