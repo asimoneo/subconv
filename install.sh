@@ -87,6 +87,7 @@ if [ "$ACTION_CHOICE" -eq 2 ]; then
     rm -f /www/subconv_debug.txt
     rm -f /tmp/subconv_ver_cache
     rm -f /tmp/subconv_status.json
+    rm -f /tmp/subconv.lock
     
     if [ -f /etc/crontabs/root ]; then
         sed -i '/subconv-update.sh/d' /etc/crontabs/root
@@ -198,11 +199,30 @@ local function write_to_file(path, content)
     return false
 end
 
+-- Запись в UCI под общей блокировкой.
+-- Скрипт может работать одновременно в нескольких экземплярах (cron, кнопки в LuCI),
+-- а параллельные set/commit в libuci теряют изменения друг друга: подписка так и остаётся
+-- в статусе "Обновление...". Блокировка + свежий курсор на каждую запись это исключают.
+local function uci_write(fn)
+    local lock_fh = nixio.open("/tmp/subconv.lock", "w")
+    if lock_fh then pcall(lock_fh.lock, lock_fh, "lock") end
+
+    local u = require("luci.model.uci").cursor()
+    fn(u)
+    u:commit("subconv")
+
+    if lock_fh then
+        pcall(lock_fh.lock, lock_fh, "ulock")
+        lock_fh:close()
+    end
+end
+
 -- Сохранение статуса последней операции в UCI
 local function save_status(status_text)
     if sub_id then
-        uci:set("subconv", sub_id, "last_type", status_text)
-        uci:commit("subconv")
+        uci_write(function(u)
+            u:set("subconv", sub_id, "last_type", status_text)
+        end)
         -- Сбрасываем серверный кэш статуса для мгновенного обновления в веб-интерфейсе
         os.remove("/tmp/subconv_status.json")
     end
@@ -281,6 +301,7 @@ end
 -- ==========================================
 -- Точка входа в скрипт
 -- ==========================================
+local function main()
 
 log("=== СТАРТ ОБНОВЛЕНИЯ ===")
 
@@ -350,8 +371,9 @@ local hdr_file = "/tmp/sub_headers_" .. (sub_id or "tmp") .. ".tmp"
 local resp_raw = fetch_subscription(url, ua, hwid, dev_os, dev_model, hdr_file)
 local uinfo_str = parse_userinfo(hdr_file)
 if uinfo_str and sub_id then
-    uci:set("subconv", sub_id, "userinfo", uinfo_str)
-    uci:commit("subconv")
+    uci_write(function(u)
+        u:set("subconv", sub_id, "userinfo", uinfo_str)
+    end)
     log("Тариф (структура): " .. uinfo_str)
 end
 if not resp_raw or #resp_raw < 3 then
@@ -413,6 +435,17 @@ else
         local snippet = decoded:sub(1, 50):gsub("[%c\n\r]", " ")
         exit_with_error("Узлы не найдены. Начало ответа: " .. snippet, "Пусто (Нет узлов)")
     end
+end
+
+end -- main
+
+-- Страховка: любая непредвиденная ошибка Lua попадает в журнал и в статус подписки,
+-- а не оставляет её навсегда в состоянии "Обновление..."
+local ok, err = xpcall(main, debug.traceback)
+if not ok then
+    log("КРИТИЧЕСКАЯ ОШИБКА СКРИПТА: " .. tostring(err):gsub("[\r\n]+", " | "))
+    pcall(save_status, "Ошибка скрипта")
+    os.exit(1)
 end
 EOF
 chmod +x /usr/libexec/subconv-update.sh
@@ -602,12 +635,29 @@ function action_update_ajax()
     os.remove("/tmp/subconv_status.json")
 
     if update_all == "1" then
+        -- 1) Сначала собираем ID подписок (конфигурацию внутри foreach не меняем)
+        local ids = {}
         uci:foreach("subconv", "subscription", function(s)
-            local id = s[".name"]
-            uci:set("subconv", id, "last_type", "Обновление...")
-            sys.call("/usr/libexec/subconv-update.sh " .. util.shellquote(id) .. " >/dev/null 2>&1 &")
+            ids[#ids + 1] = s[".name"]
         end)
-        uci:commit("subconv")
+
+        if #ids > 0 then
+            -- 2) Помечаем все подписки одним коммитом ДО запуска обновления
+            for _, id in ipairs(ids) do
+                uci:set("subconv", id, "last_type", "Обновление...")
+            end
+            uci:commit("subconv")
+
+            -- 3) Один фоновый процесс обновляет подписки строго по очереди:
+            --    параллельные записи в UCI теряли статусы, а провайдер видел несколько
+            --    одновременных запросов с одним и тем же HWID
+            local cmds = {}
+            for _, id in ipairs(ids) do
+                cmds[#cmds + 1] = "/usr/libexec/subconv-update.sh " .. util.shellquote(id)
+            end
+            sys.call("( " .. table.concat(cmds, "; ") .. " ) >/dev/null 2>&1 </dev/null &")
+        end
+
         http.prepare_content("application/json")
         http.write('{"status":"ok","all":true}')
         return
@@ -935,7 +985,9 @@ local CSS_TWEAKS = [===[<style>
     word-break: break-all !important;
   }
 
-  /* Кол 2 (User-Agent Drop-down): строгие 105-115px, видимые стрелки и меню поверх таблицы */
+  /* Кол 2 (User-Agent): родной выпадающий список LuCI (cbi-dropdown) с возможностью ввести свой вариант.
+     Внешний вид остаётся как в теме OpenWrt, ограничивается только ширина: собственный min-width
+     у cbi-dropdown сбрасывается, иначе колонка раздувается до ~200px. */
   .cbi-section-table th:nth-child(2),
   .cbi-section-table td:nth-child(2) {
     width: 110px !important;
@@ -943,34 +995,32 @@ local CSS_TWEAKS = [===[<style>
     max-width: 115px !important;
     overflow: visible !important;
   }
-  .cbi-section-table td:nth-child(2) select,
-  .cbi-section-table td:nth-child(2) input,
-  .cbi-section-table td:nth-child(2) .cbi-input-select,
   .cbi-section-table td:nth-child(2) cbi-dropdown,
   .cbi-section-table td:nth-child(2) .cbi-dropdown {
     width: 100% !important;
+    min-width: 0 !important;
     max-width: 110px !important;
-    min-width: 95px !important;
-    height: 28px !important;
-    line-height: 20px !important;
-    font-size: 11px !important;
-    padding: 2px 4px !important;
     box-sizing: border-box !important;
-    border-radius: 4px !important;
   }
-  .cbi-section-table td:nth-child(2) cbi-dropdown[open],
-  .cbi-section-table td:nth-child(2) .cbi-dropdown[open] {
-    position: relative !important;
-    z-index: 9999 !important;
+  /* Закрытый список: длинный текст обрезается, а не растягивает поле */
+  .cbi-section-table td:nth-child(2) cbi-dropdown:not([open]) > ul,
+  .cbi-section-table td:nth-child(2) .cbi-dropdown:not([open]) > ul {
+    min-width: 0 !important;
   }
-  .cbi-section-table td:nth-child(2) cbi-dropdown > ul:not(.preview),
-  .cbi-section-table td:nth-child(2) .cbi-dropdown > ul:not(.preview) {
-    position: absolute !important;
-    z-index: 10000 !important;
-    min-width: 135px !important;
-    max-width: 200px !important;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6) !important;
-    white-space: normal !important;
+  .cbi-section-table td:nth-child(2) cbi-dropdown:not([open]) > ul > li,
+  .cbi-section-table td:nth-child(2) .cbi-dropdown:not([open]) > ul > li {
+    min-width: 0 !important;
+    max-width: 100% !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+  }
+  /* Открытый список: по ширине самого длинного пункта, чтобы названия читались полностью */
+  .cbi-section-table td:nth-child(2) cbi-dropdown[open] > ul:not(.preview),
+  .cbi-section-table td:nth-child(2) .cbi-dropdown[open] > ul:not(.preview) {
+    min-width: 100% !important;
+    width: max-content !important;
+    max-width: 260px !important;
   }
 
   /* Кол 3 (HWID): комфортная ширина для переноса по дефису без сплющивания букв */
@@ -1545,7 +1595,8 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
         window.__subconv_watcher_running = true;
 
         var attempts = 0;
-        var maxAttempts = 20;
+        // Подписки обновляются по очереди, поэтому время ожидания растёт с их количеством
+        var maxAttempts = 20 + 10 * Math.max(0, targets.length - 1);
         var isRequestPending = false;
         var retryDelay = 2000;
 
@@ -1839,8 +1890,8 @@ function url_list.cfgvalue(self, section)
     return string.format('<div class="subconv-code-cell" onclick="copyCell(this, this.getAttribute(\'data-copy\'))" data-copy="%s" title="Нажмите, чтобы скопировать">%s</div>', esc_val, display_val)
 end
 
--- Кол 2: User-Agent (компактный выпадающий список ListValue)
-local ua_list = s_list:option(ListValue, "user_agent", translate("User-Agent"))
+-- Кол 2: User-Agent (родной выпадающий список LuCI с возможностью ввести свой вариант)
+local ua_list = s_list:option(Value, "user_agent", translate("User-Agent"))
 ua_list:value("SubConv/1.0", "SubConv/1.0")
 ua_list:value("sing-box/1.9.3", "sing-box 1.9.3")
 ua_list:value("mihomo/1.18.3", "mihomo 1.18.3")
