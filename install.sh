@@ -250,12 +250,12 @@ local function parse_userinfo(header_file)
     for line in content:gmatch("[^\r\n]+") do
         local uinfo = line:match("^[Ss][Uu][Bb][Ss][Cc][Rr][Ii][Pp][Tt][Ii][Oo][Nn]%-[Uu][Ss][Ee][Rr][Ii][Nn][Ff][Oo]:%s*(.-)%s*$")
         if uinfo then
-            local upload = tonumber(uinfo:match("upload=(%d+)") or 0)
-            local download = tonumber(uinfo:match("download=(%d+)") or 0)
-            local total = tonumber(uinfo:match("total=(%d+)") or 0)
-            local expire = tonumber(uinfo:match("expire=(%d+)") or 0)
+            local upload = tonumber(uinfo:match("upload=(%d+)") or 0) or 0
+            local download = tonumber(uinfo:match("download=(%d+)") or 0) or 0
+            local total = tonumber(uinfo:match("total=(%d+)") or 0) or 0
+            local expire = tonumber(uinfo:match("expire=(%d+)") or 0) or 0
             local used = upload + download
-            return string.format("%d|%d|%d", used, total, expire)
+            return string.format("%.0f|%.0f|%.0f", used, total, expire)
         end
     end
     return nil
@@ -1139,8 +1139,8 @@ local CSS_TWEAKS = [===[<style>
   }
 
   /* 8. Кнопка "Добавить подписку" по центру внизу формы */
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) div[id*="_add"],
-  .subconv-add-section div[id*="_add"] {
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]),
+  .subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) {
     display: flex !important;
     justify-content: center !important;
     align-items: center !important;
@@ -1148,20 +1148,20 @@ local CSS_TWEAKS = [===[<style>
     margin-bottom: 6px !important;
     padding: 0 !important;
   }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) div[id*="_add"] .cbi-value-title,
-  .subconv-add-section div[id*="_add"] .cbi-value-title {
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-value-title,
+  .subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-value-title {
     display: none !important;
   }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) div[id*="_add"] .cbi-value-field,
-  .subconv-add-section div[id*="_add"] .cbi-value-field {
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-value-field,
+  .subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-value-field {
     display: flex !important;
     justify-content: center !important;
     align-items: center !important;
     margin: 0 !important;
     padding: 0 !important;
   }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) div[id*="_add"] .cbi-button,
-  .subconv-add-section div[id*="_add"] .cbi-button {
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-button,
+  .subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-button {
     min-width: 240px !important;
     height: 38px !important;
     padding: 6px 28px !important;
@@ -1176,11 +1176,17 @@ local CSS_TWEAKS = [===[<style>
     letter-spacing: 0.3px !important;
     transition: all 0.2s ease !important;
   }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) div[id*="_add"] .cbi-button:hover,
-  .subconv-add-section div[id*="_add"] .cbi-button:hover {
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-button:hover,
+  .subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-button:hover {
     background: #10b981 !important;
     box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4) !important;
     transform: translateY(-1px) !important;
+  }
+  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:not(:has(button[name*="_add"])) .cbi-value-title,
+  .subconv-add-section .cbi-value:not(:has(button[name*="_add"])) .cbi-value-title {
+    display: block !important;
+    visibility: visible !important;
+    opacity: 1 !important;
   }
 
   /* 9. ЖУРНАЛ ОТЛАДКИ: 100% ширина, идеально выровненная со всеми блоками страницы */
@@ -1213,8 +1219,7 @@ local CSS_TWEAKS = [===[<style>
     box-sizing: border-box !important;
     display: block !important;
   }
-  fieldset.cbi-section:has(#subconv-debug-log) .cbi-value-title,
-  #cbi-subconv-global .cbi-value-title {
+  fieldset.cbi-section:has(#subconv-debug-log) .cbi-value-title {
     display: none !important;
   }
   #subconv-debug-log {
@@ -1506,6 +1511,22 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
             }
         }
 
+        var subIdInput = document.querySelector('[name="cbid.subconv.add.sub_id"]');
+        if (subIdInput) {
+            var subIdRow = subIdInput.closest('.cbi-value');
+            if (subIdRow) {
+                var titleEl = subIdRow.querySelector('.cbi-value-title');
+                if (titleEl) {
+                    titleEl.style.setProperty('display', 'block', 'important');
+                    titleEl.style.setProperty('visibility', 'visible', 'important');
+                    titleEl.style.setProperty('opacity', '1', 'important');
+                    if (!titleEl.innerText || titleEl.innerText.trim() === '') {
+                        titleEl.innerText = 'Имя подписки (ID)';
+                    }
+                }
+            }
+        }
+
         var addSection = document.querySelector('fieldset:has([name="cbid.subconv.add.sub_id"])') ||
                          document.querySelector('#cbi-subconv-add:not(:has(textarea))');
         if (addSection) {
@@ -1593,7 +1614,6 @@ local JS_TWEAKS_TEMPLATE = [===[<script>
         var targets = document.querySelectorAll('.subconv-status-updating');
         if (!targets.length) return;
         window.__subconv_watcher_running = true;
-
         var attempts = 0;
         // Подписки обновляются по очереди, поэтому время ожидания растёт с их количеством
         var maxAttempts = 20 + 10 * Math.max(0, targets.length - 1);
@@ -1892,9 +1912,9 @@ end
 
 -- Кол 2: User-Agent (родной выпадающий список LuCI с возможностью ввести свой вариант)
 local ua_list = s_list:option(Value, "user_agent", translate("User-Agent"))
-ua_list:value("SubConv/1.0", "SubConv/1.0")
+ua_list:value("SubConv/1.0", "SubConv/1.0 (По умолчанию)")
 ua_list:value("sing-box/1.9.3", "sing-box 1.9.3")
-ua_list:value("mihomo/1.18.3", "mihomo 1.18.3")
+ua_list:value("mihomo/1.18.3", "mihomo 1.18.3 (Clash.Meta)")
 ua_list:value("Happ/SC", "Happ/SC")
 ua_list:value("v2rayN/6.42", "v2rayN 6.42")
 ua_list:value("Shadowrocket/1982", "Shadowrocket/1982")
