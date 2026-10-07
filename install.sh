@@ -35,6 +35,16 @@ while [ "$#" -gt 0 ]; do
             ACTION_CHOICE="$2"
             shift 2
             ;;
+        1)
+            SILENT_MODE=1
+            ACTION_CHOICE=1
+            shift
+            ;;
+        2)
+            SILENT_MODE=1
+            ACTION_CHOICE=2
+            shift
+            ;;
         *)
             shift
             ;;
@@ -130,6 +140,11 @@ mkdir -p /usr/lib/lua/luci/controller
 mkdir -p /usr/lib/lua/luci/model/cbi
 mkdir -p /usr/share/luci/menu.d
 mkdir -p /usr/share/rpcd/acl.d
+
+if [ ! -f /usr/libexec/happ-decrypt ]; then
+    echo "📦 Загрузка дешифратора happ-decrypt..."
+    curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt" -o /usr/libexec/happ-decrypt 2>/dev/null && chmod +x /usr/libexec/happ-decrypt || true
+fi
 
 cat << 'EOF' > /usr/libexec/subconv-update.sh
 #!/usr/bin/lua
@@ -602,6 +617,7 @@ function index()
     entry({"admin", "services", "subconv", "set_param"}, call("action_set_param")).leaf = true
     entry({"admin", "services", "subconv", "set_log_size"}, call("action_set_log_size")).leaf = true
     entry({"admin", "services", "subconv", "clear_log"}, call("action_clear_log")).leaf = true
+    entry({"admin", "services", "subconv", "self_update"}, call("action_self_update")).leaf = true
 end
 
 local function format_sub_info(id, uinfo)
@@ -828,6 +844,27 @@ function action_clear_log()
     http.prepare_content("application/json")
     http.write('{"status":"ok"}')
 end
+
+function action_self_update()
+    local http = require "luci.http"
+    local sys = require "luci.sys"
+
+    local cmd = "curl -fsSL 'https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/install.sh' -o /tmp/install_subconv.sh && sh /tmp/install_subconv.sh 1 >/tmp/subconv_install.log 2>&1"
+    local res = sys.call(cmd)
+    os.remove("/tmp/install_subconv.sh")
+    os.execute("rm -rf /tmp/luci-indexcache /tmp/luci-modulecache/* 2>/dev/null; /etc/init.d/rpcd restart 2>/dev/null")
+
+    http.prepare_content("application/json")
+    if res == 0 then
+        http.write('{"status":"ok"}')
+    else
+        local f_log = io.open("/tmp/subconv_install.log", "r")
+        local log_err = f_log and f_log:read("*all") or "Unknown error"
+        if f_log then f_log:close() end
+        local snippet = log_err:sub(1, 300):gsub("[%c\r\n]", " ")
+        http.write('{"status":"error","message":"' .. snippet:gsub('"', '\\"') .. '"}')
+    end
+end
 EOF
 
 cat << 'EOF' > /usr/lib/lua/luci/model/cbi/subconv.lua
@@ -921,7 +958,7 @@ end
 -- ==========================================
 local current_ver = "0.3.17"
 
-local title_html = [[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;" id="plugin-ver-text">v]] .. current_ver .. [[</span> <button type="button" class="cbi-button" style="margin-left: 10px; font-size: 12px; padding: 2px 6px;" id="btn-check-ver" onclick="checkPluginVersion()">Проверить обновления</button><button type="button" class="cbi-button cbi-button-apply" style="margin-left: 5px; font-size: 12px; padding: 2px 6px; display: none;" id="btn-do-update" onclick="doPluginUpdate()">Обновить</button>]]
+local title_html = [[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;" id="plugin-ver-text">v]] .. current_ver .. [[</span> <button type="button" class="cbi-button" style="padding: 3px 6px; font-size: 13px; margin-left: 8px; min-width: 28px; width: 28px; height: 28px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; vertical-align: middle; cursor: pointer;" id="btn-check-ver" onclick="checkPluginVersion()" title="Проверить обновления плагина">🔄</button><button type="button" class="cbi-button cbi-button-apply" style="padding: 3px 6px; font-size: 13px; margin-left: 6px; min-width: 28px; width: 28px; height: 28px; line-height: 20px; display: none; align-items: center; justify-content: center; box-sizing: border-box; vertical-align: middle; cursor: pointer; background: #2563eb; border-color: #3b82f6;" id="btn-do-update" onclick="doPluginUpdate()" title="Установить обновление плагина">📥</button>]]
 
 local CSS_TWEAKS = [===[<style>
   /* 1. Выделение и плавная анимация (0.8с) раскрытия формы добавления */
@@ -1519,8 +1556,9 @@ local JS_TWEAKS_PART1 = [===[<script>
     function checkPluginVersion() {
         var btnCheck = document.getElementById('btn-check-ver');
         if(!btnCheck) return;
-        btnCheck.innerText = 'Проверка...';
+        btnCheck.innerHTML = '⏳';
         btnCheck.disabled = true;
+        btnCheck.title = 'Проверка обновлений...';
         fetch('https://api.github.com/repos/asimoneo/subconv/commits/main', {cache: 'no-store'})
             .then(res => res.json())
             .then(data => {
@@ -1536,12 +1574,18 @@ local JS_TWEAKS_PART1 = [===[<script>
 
 local JS_TWEAKS_PART2 = [===[';
                     var verText = document.getElementById('plugin-ver-text');
+                    var btnUpd = document.getElementById('btn-do-update');
                     if(remote !== current) {
                         verText.innerHTML = 'v' + current + ' &rarr; <b style="color:#ff9800;">v' + remote + '</b>';
-                        var btnUpd = document.getElementById('btn-do-update');
-                        if(btnUpd) btnUpd.style.display = 'inline-block';
+                        if(btnUpd) {
+                            btnUpd.style.display = 'inline-flex';
+                            btnUpd.title = 'Установить обновление плагина (v' + remote + ')';
+                        }
+                        showToast('Доступно обновление: v' + remote);
                     } else {
                         verText.innerHTML = 'v' + current + ' (Актуально)';
+                        if(btnUpd) btnUpd.style.display = 'none';
+                        showToast('У вас установлена актуальная версия плагина');
                     }
                 } else {
                     throw new Error("No VERSION tag");
@@ -1551,20 +1595,44 @@ local JS_TWEAKS_PART2 = [===[';
                 alert('Ошибка проверки версии: ' + e.message);
             })
             .finally(() => {
-                btnCheck.innerText = 'Проверить обновления';
+                btnCheck.innerHTML = '🔄';
                 btnCheck.disabled = false;
+                btnCheck.title = 'Проверить обновления плагина';
             });
     }
 
     function doPluginUpdate() {
-        var hiddenBtn = document.querySelector('#subconv_self_update_btn');
-        if(hiddenBtn) {
-            document.getElementById('btn-do-update').innerText = 'Обновление...';
-            document.getElementById('btn-do-update').disabled = true;
-            hiddenBtn.click();
-        } else {
-            alert('Скрытая кнопка обновления не найдена в DOM');
-        }
+        var btnUpd = document.getElementById('btn-do-update');
+        if(!btnUpd || btnUpd.disabled) return;
+        if(!confirm('Обновить плагин Subconv до актуальной версии?')) return;
+
+        btnUpd.disabled = true;
+        btnUpd.innerHTML = '⏳';
+        btnUpd.title = 'Установка обновления плагина...';
+        showToast('Загрузка и установка обновления плагина (10-15 сек)...');
+
+        var updateUrl = window.location.pathname.replace(/\/+$/, '') + '/self_update';
+        fetch(updateUrl, { method: 'POST', cache: 'no-store' })
+            .then(function(r) { return r.json(); })
+            .then(function(res) {
+                if (res.status === 'ok') {
+                    showToast('Плагин успешно обновлен! Перезагрузка страницы...');
+                    setTimeout(function() {
+                        window.location.reload();
+                    }, 1500);
+                } else {
+                    alert('Ошибка обновления: ' + (res.message || 'Сбой скрипта'));
+                    btnUpd.disabled = false;
+                    btnUpd.innerHTML = '📥';
+                    btnUpd.title = 'Установить обновление плагина';
+                }
+            })
+            .catch(function(err) {
+                showToast('Обновление завершается, перезагрузка страницы...');
+                setTimeout(function() {
+                    window.location.reload();
+                }, 3000);
+            });
     }
 
     // Асинхронное получение свежих строк журнала отладки без перезагрузки страницы
@@ -1758,8 +1826,14 @@ local JS_TWEAKS_PART2 = [===[';
                 btnToggle.onmouseleave = function() { btnToggle.style.background = '#059669'; };
 
                 var btnCheck = document.getElementById('btn-check-ver');
+                var btnUpd = document.getElementById('btn-do-update');
                 if (btnCheck && btnCheck.parentNode) {
-                    btnCheck.parentNode.insertBefore(btnToggle, btnCheck.nextSibling);
+                    var insertRef = (btnUpd && btnUpd.nextSibling) || (btnCheck && btnCheck.nextSibling);
+                    if (insertRef) {
+                        btnCheck.parentNode.insertBefore(btnToggle, insertRef);
+                    } else {
+                        btnCheck.parentNode.appendChild(btnToggle);
+                    }
                 }
             }
 
@@ -2324,8 +2398,7 @@ local JS_TWEAKS_PART3 = [===[';
         initStatusWatcher();
     }, 200);
     setTimeout(alignFormAndTable, 600);
-</script>
-<button type="submit" name="subconv_self_update" value="1" id="subconv_self_update_btn" style="display:none;"></button>]===]
+</script>]===]
 
 local m = Map("subconv", "Subconv", translate("Парсинг подписок и конвертация в удобные списки серверов для раздачи другим плагинам/девайсам."))
 
@@ -2778,11 +2851,6 @@ end
 
 function m.on_after_commit(self)
     sys.call("/usr/libexec/subconv-cron.sh")
-end
-
-if http.formvalue("subconv_self_update") == "1" then
-    sys.call("curl -fsSL 'https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/install.sh' | sh -s 1 >/dev/null 2>&1 &")
-    http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
 return m
