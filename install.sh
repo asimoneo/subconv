@@ -1,12 +1,12 @@
 #!/bin/sh
 # =====================================================================
-# Subconv Installer & Updater (v0.3.16)
+# Subconv Installer & Updater (v0.3.17)
 # =====================================================================
 # Автоматический скрипт установки и обновления плагина Subconv для OpenWrt.
 # Поддерживает архитектуры: x86_64, aarch64, arm, mips.
 # =====================================================================
 
-VERSION="0.3.16"
+VERSION="0.3.17"
 
 # Цвета для вывода в терминал
 RED='\033[0;31m'
@@ -85,6 +85,7 @@ if [ "$ACTION_CHOICE" -eq 2 ]; then
     rm -f /usr/share/rpcd/acl.d/subconv.json
     rm -f /etc/config/subconv
     rm -f /www/subconv_debug.txt
+    rm -f /tmp/subconv_debug.log
     rm -f /tmp/subconv_ver_cache
     rm -f /tmp/subconv_status.json
     rm -f /tmp/subconv.lock
@@ -135,35 +136,23 @@ cat << 'EOF' > /usr/libexec/subconv-update.sh
 -- =====================================================================
 -- Скрипт обновления и конвертации подписок (subconv-update.sh)
 -- =====================================================================
--- Этот скрипт вызывается как вручную из LuCI, так и по расписанию Cron.
--- Он скачивает подписку, дешифрует happ://crypt ссылки, проверяет
--- полученные данные (Base64, JSON, YAML) и сохраняет список ссылок vless://.
-
 local uci = require "luci.model.uci".cursor()
 local util = require "luci.util"
 local nixio = require "nixio"
 local sys = require "luci.sys"
 
--- ID подписки передается первым аргументом командной строки
 local sub_id = arg[1]
 local trigger_type = arg[2] or "manual"
-local debug_file = "/www/subconv_debug.txt"
+local debug_file = "/tmp/subconv_debug.log"
 
--- ==========================================
--- Вспомогательные функции
--- ==========================================
+-- Буфер записей для атомарного сброса в файл (Atomic Flush)
+local log_buffer = {}
 
--- Запись в журнал отладки
-local function log(msg)
-    local f_dbg = io.open(debug_file, "a")
-    if f_dbg then
-        -- Форматируем строку: [Дата] [ID подписки] Сообщение
-        f_dbg:write(os.date("%Y-%m-%d %H:%M:%S") .. " [" .. (sub_id or "NONE") .. "] " .. msg .. "\n")
-        f_dbg:close()
-    end
+local function add_log(id, msg, is_err)
+    table.insert(log_buffer, { id = id, msg = msg, is_err = is_err })
 end
 
--- Безопасное маскирование приватных URL и токенов (стандарт GitHub / AWS)
+-- Безопасное маскирование приватных URL и токенов
 local function mask_url(u)
     if not u or u == "" then return "" end
     if #u <= 18 then return u end
@@ -189,7 +178,7 @@ local function mask_url(u)
     return prefix .. "••••" .. tail
 end
 
--- Запись текста в файл (атомарно, с проверкой ошибок)
+-- Запись текста в файл (атомарно)
 local function write_to_file(path, content)
     local f = io.open(path, "w")
     if f then
@@ -200,10 +189,7 @@ local function write_to_file(path, content)
     return false
 end
 
--- Запись в UCI под общей блокировкой.
--- Скрипт может работать одновременно в нескольких экземплярах (cron, кнопки в LuCI),
--- а параллельные set/commit в libuci теряют изменения друг друга: подписка так и остаётся
--- в статусе "Обновление...". Блокировка + свежий курсор на каждую запись это исключают.
+-- Запись в UCI под блокировкой
 local function uci_write(fn)
     local lock_fh = nixio.open("/tmp/subconv.lock", "w")
     if lock_fh then pcall(lock_fh.lock, lock_fh, "lock") end
@@ -219,27 +205,120 @@ local function uci_write(fn)
 end
 
 -- Сохранение статуса последней операции в UCI
-local function save_status(status_text)
-    if sub_id then
+local function save_status(sid, status_text)
+    if sid and sid ~= "--all" then
         uci_write(function(u)
-            u:set("subconv", sub_id, "last_type", status_text)
+            u:set("subconv", sid, "last_type", status_text)
         end)
-        -- Сбрасываем серверный кэш статуса для мгновенного обновления в веб-интерфейсе
         os.remove("/tmp/subconv_status.json")
     end
 end
 
--- Аварийное завершение работы с записью ошибки в лог и статусы
-local function exit_with_error(log_msg, status_msg)
-    log("ОШИБКА: " .. log_msg)
-    save_status(status_msg or "Ошибка")
-    os.exit(1)
+-- Усечение старых строк при переполнении лимита (FIFO)
+local function trim_log_if_needed(path, max_kb)
+    max_kb = tonumber(max_kb) or 1024
+    local max_bytes = max_kb * 1024
+    local f = io.open(path, "r")
+    if not f then return end
+    local size = f:seek("end")
+    if size and size > max_bytes then
+        local keep_bytes = math.floor(max_bytes * 0.75)
+        f:seek("set", math.max(0, size - keep_bytes))
+        local rest = f:read("*all") or ""
+        f:close()
+        local nl = rest:find("\n")
+        if nl then rest = rest:sub(nl + 1) end
+        local fw = io.open(path, "w")
+        if fw then
+            fw:write(rest)
+            fw:close()
+        end
+    else
+        f:close()
+    end
 end
 
--- ==========================================
--- Логика парсинга данных подписки (биллинг)
--- ==========================================
--- Читает служебные заголовки ответа (subscription-userinfo)
+-- Дедупликация повторяющихся ошибок со счетчиком (repeat xN)
+local function append_or_dedup_error(f_path, id, err_msg, ts)
+    local f = io.open(f_path, "r")
+    if not f then
+        local fw = io.open(f_path, "a")
+        if fw then fw:write(string.format("%s [%s] %s\n", ts, id, err_msg)); fw:close() end
+        return
+    end
+
+    local sz = f:seek("end")
+    local check_len = math.min(sz, 2048)
+    f:seek("set", math.max(0, sz - check_len))
+    local tail = f:read("*all") or ""
+    f:close()
+
+    local last_line = tail:match("([^\r\n]+)[\r\n]*$")
+    if last_line then
+        local line_id, line_msg = last_line:match("^%d%d%-%d%d%-%d%d %d%d:%d%d %[([^%]]+)%] (.+)$")
+        if line_id == id then
+            local base_err, count_str = line_msg:match("^(.-)%s*%(repeat x(%d+)%)$")
+            if not base_err then
+                base_err = line_msg
+                count_str = "1"
+            end
+            base_err = base_err:match("^%s*(.-)%s*$")
+            local clean_err = err_msg:match("^%s*(.-)%s*$")
+            if base_err == clean_err then
+                local next_count = (tonumber(count_str) or 1) + 1
+                local updated_line = string.format("%s [%s] %s (repeat x%d)", ts, id, base_err, next_count)
+
+                local f_full = io.open(f_path, "r")
+                if f_full then
+                    local content = f_full:read("*all") or ""
+                    f_full:close()
+                    local new_content = content:gsub("[^\r\n]+[\r\n]*$", "")
+                    local fw = io.open(f_path, "w")
+                    if fw then
+                        fw:write(new_content .. updated_line .. "\n")
+                        fw:close()
+                    end
+                    return
+                end
+            end
+        end
+    end
+
+    local fw = io.open(f_path, "a")
+    if fw then
+        fw:write(string.format("%s [%s] %s\n", ts, id, err_msg))
+        fw:close()
+    end
+end
+
+-- Атомарный сброс буфера логов на диск в RAM (/tmp)
+local function flush_logs()
+    if #log_buffer == 0 then return end
+    local ts = os.date("%y-%m-%d %H:%M")
+    local max_kb = tonumber(uci:get("subconv", "add", "max_log_size_kb")) or 1024
+
+    for _, entry in ipairs(log_buffer) do
+        if entry.is_err then
+            append_or_dedup_error(debug_file, entry.id, entry.msg, ts)
+        else
+            local fw = io.open(debug_file, "a")
+            if fw then
+                fw:write(string.format("%s [%s] %s\n", ts, entry.id, entry.msg))
+                fw:close()
+            end
+        end
+    end
+    log_buffer = {}
+
+    local stat = nixio.fs.lstat("/www/subconv_debug.txt")
+    if not stat or stat.type ~= "lnk" then
+        os.execute("ln -sf /tmp/subconv_debug.log /www/subconv_debug.txt 2>/dev/null")
+    end
+
+    trim_log_if_needed(debug_file, max_kb)
+end
+
+-- Парсинг billing userinfo
 local function parse_userinfo(header_file)
     local f = io.open(header_file, "r")
     if not f then return nil end
@@ -247,7 +326,6 @@ local function parse_userinfo(header_file)
     f:close()
     os.remove(header_file)
 
-    -- Ищем заголовок subscription-userinfo (регистронезависимо)
     for line in content:gmatch("[^\r\n]+") do
         local uinfo = line:match("^[Ss][Uu][Bb][Ss][Cc][Rr][Ii][Pp][Tt][Ii][Oo][Nn]%-[Uu][Ss][Ee][Rr][Ii][Nn][Ff][Oo]:%s*(.-)%s*$")
         if uinfo then
@@ -262,14 +340,11 @@ local function parse_userinfo(header_file)
     return nil
 end
 
--- ==========================================
--- Логика скачивания подписки (HTTP GET)
--- ==========================================
-local function fetch_subscription(url, ua, hwid, dev_os, dev_model, header_output)
-    local tmp_file = "/tmp/sub_resp_" .. (sub_id or "tmp") .. ".bin"
+-- Скачивание подписки через curl
+local function fetch_subscription(sid, url, ua, hwid, dev_os, dev_model, header_output)
+    local tmp_file = "/tmp/sub_resp_" .. (sid or "tmp") .. ".bin"
     os.remove(tmp_file)
 
-    -- Формируем команду curl с эмуляцией заголовков клиента (строго по стандарту 0.3.15)
     local cmd = string.format(
         "curl -k -L -s --connect-timeout 15 -m 30 " ..
         "-A %s " ..
@@ -286,7 +361,6 @@ local function fetch_subscription(url, ua, hwid, dev_os, dev_model, header_outpu
         util.shellquote(tmp_file)
     )
 
-    -- Выполняем curl и читаем возвращенный HTTP-код
     local pipe = io.popen(cmd)
     local http_code = pipe:read("*all")
     pipe:close()
@@ -296,167 +370,166 @@ local function fetch_subscription(url, ua, hwid, dev_os, dev_model, header_outpu
     if f then f:close() end
     os.remove(tmp_file)
 
-    -- Возвращаем тело ответа вместе с кодом состояния
     return body .. (http_code or "000")
 end
 
--- ==========================================
--- Точка входа в скрипт
--- ==========================================
-local function main()
+-- Обновление отдельной подписки
+local function update_single_sub(sid, trig_label)
+    local url = uci:get("subconv", sid, "url")
+    local ua = uci:get("subconv", sid, "user_agent") or "SubConv/1.0"
+    local hwid = uci:get("subconv", sid, "hwid") or "openwrt-router-default"
+    local dev_os = uci:get("subconv", sid, "device_os") or "OpenWrt"
+    local dev_model = uci:get("subconv", sid, "device_model") or "OpenWrt Router"
+    local out_path = "/www/" .. sid .. ".txt"
 
-local trigger_desc = "вручную"
-if trigger_type == "cron" then
-    trigger_desc = "по расписанию (Cron)"
-elseif trigger_type == "manual_all" then
-    trigger_desc = "по кнопке 'Обновить все'"
-elseif trigger_type == "cli" then
-    trigger_desc = "из командной строки"
-end
-log(string.format("=== СТАРТ ОБНОВЛЕНИЯ (%s) ===", trigger_desc))
-
--- Проверяем, передан ли ID подписки
-if not sub_id or sub_id == "" then
-    exit_with_error("Не указан ID подписки", "Ошибка (ID)")
-end
-
--- Читаем конфигурацию подписки из /etc/config/subconv
-local url = uci:get("subconv", sub_id, "url")
-local ua = uci:get("subconv", sub_id, "user_agent") or "SubConv/1.0"
-local hwid = uci:get("subconv", sub_id, "hwid") or "openwrt-router-default"
-local dev_os = uci:get("subconv", sub_id, "device_os") or "OpenWrt"
-local dev_model = uci:get("subconv", sub_id, "device_model") or "OpenWrt Router"
-local out_path = "/www/" .. sub_id .. ".txt"
-
-if not url or url == "" then
-    exit_with_error("В конфигурации отсутствует URL", "Ошибка (URL)")
-end
-
--- 1. Проверяем, является ли ссылка зашифрованной (happ://)
-if url:match("^happ://") or url:match("^v2raytun://") then
-    log("Обнаружена крипто-ссылка: " .. mask_url(url))
-    local decryptor = "/usr/libexec/happ-decrypt"
-    
-    -- Проверяем наличие установленного Go-бинарника дешифратора
-    if not nixio.fs.access(decryptor) then
-        exit_with_error("Дешифратор happ-decrypt не установлен в /usr/libexec/happ-decrypt", "Нет дешифратора")
+    if not url or url == "" then
+        return false, "missing URL", "Ошибка (URL)"
     end
 
-    -- Записываем версию бинарника дешифратора в лог
-    local v_handle = io.popen(decryptor .. " --version 2>/dev/null")
-    local dec_ver = v_handle and v_handle:read("*l") or "unknown"
-    if v_handle then v_handle:close() end
-    log("Дешифратор: " .. dec_ver .. "...")
-
-    -- Вызываем Go-бинарник для расшифровки ссылки
-    local cmd = decryptor .. " " .. util.shellquote(url) .. " 2>&1"
-    local p = io.popen(cmd)
-    local out = p:read("*all")
-    p:close()
-
-    -- Ищем расшифрованный URL в выводе дешифратора
-    local real_url = nil
-    for line in out:gmatch("[^\r\n]+") do
-        local u = line:match("^(https?://%S+)")
-        if u then
-            real_url = u
-            break
+    if url:match("^happ://") or url:match("^v2raytun://") then
+        local decryptor = "/usr/libexec/happ-decrypt"
+        if not nixio.fs.access(decryptor) then
+            return false, "decryptor not found", "Нет дешифратора"
         end
-    end
 
-    if not real_url or real_url == "" then
-        exit_with_error("Не удалось расшифровать ссылку: " .. out:gsub("[\r\n]", " "), "Ошибка дешифровки")
-    end
+        local cmd = decryptor .. " " .. util.shellquote(url) .. " 2>&1"
+        local p = io.popen(cmd)
+        local out = p:read("*all")
+        p:close()
 
-    log("Успешно расшифровано! Истинный URL: " .. mask_url(real_url))
-    url = real_url
-end
-
-log("Запрос: " .. sub_id .. " (" .. mask_url(url) .. ")")
-log("Заголовки: UA=" .. ua .. " | HWID=" .. hwid .. " | OS=" .. dev_os)
-log("Отправка запроса к серверу...")
-
--- 3. Выполняем запрос к серверу провайдера
-local hdr_file = "/tmp/sub_headers_" .. (sub_id or "tmp") .. ".tmp"
-local resp_raw = fetch_subscription(url, ua, hwid, dev_os, dev_model, hdr_file)
-local uinfo_str = parse_userinfo(hdr_file)
-if uinfo_str and sub_id then
-    uci_write(function(u)
-        u:set("subconv", sub_id, "userinfo", uinfo_str)
-    end)
-    log("Тариф (структура): " .. uinfo_str)
-end
-if not resp_raw or #resp_raw < 3 then
-    exit_with_error("Сервер не ответил (сбой сети или таймаут)", "Ошибка сети")
-end
-
--- Отделяем HTTP-код состояния от тела ответа
-local http_code = resp_raw:sub(-3)
-local resp = resp_raw:sub(1, -4)
-
-log("HTTP Код: " .. tostring(http_code))
-
-if #resp == 0 then
-    exit_with_error("Пустое тело ответа", "Ошибка (HTTP " .. http_code .. "/Пусто)")
-end
-
--- 4. Определение формата полученных данных (Base64 / Текст / JSON / YAML)
-local decoded = resp
-local is_b64 = false
-
--- Пробуем декодировать ответ из Base64
-local b64_dec = nixio.bin.b64decode(resp)
-if b64_dec and (b64_dec:match("://") or b64_dec:match("^%s*{") or b64_dec:match("^%s*%[") or b64_dec:match("proxies:") or b64_dec:match("^happ://")) then
-    decoded = b64_dec
-    is_b64 = true
-    log("Декодирован Base64")
-end
-
--- Проверяем, является ли ответ сырым массивом конфигурации (JSON/YAML)
-local is_raw = decoded:match("^%s*{") or decoded:match("^%s*%[") or decoded:match("proxies:")
-
--- 5. Сохранение полученных узлов в локальный файл для HomeProxy
-if is_raw then
-    -- Сохраняем сырой конфиг как есть
-    if write_to_file(out_path, decoded) then
-        log("УСПЕХ: Сохранен как сырой конфиг (JSON/YAML)")
-        save_status("JSON/YAML Конфиг")
-        log(string.format("=== Обновление %s завершено успешно (%s)! ===", sub_id, trigger_desc))
-    else
-        exit_with_error("Не удалось записать файл " .. out_path, "Ошибка записи")
-    end
-else
-    -- Парсим обычный текстовый список URI (vless://, vmess://)
-    local links = {}
-    for line in decoded:gmatch("[^\r\n]+") do
-        line = line:match("^%s*(.-)%s*$")
-        if line and (line:match("://") or line:match("^happ://")) then 
-            table.insert(links, line) 
+        local real_url = nil
+        for line in out:gmatch("[^\r\n]+") do
+            local u = line:match("^(https?://%S+)")
+            if u then real_url = u; break end
         end
+
+        if not real_url or real_url == "" then
+            return false, "decrypt failed", "Ошибка дешифровки"
+        end
+        url = real_url
     end
 
-    if #links > 0 then
-        if write_to_file(out_path, table.concat(links, "\n") .. "\n") then
-            log("УСПЕХ: Найдено " .. #links .. " узлов URI")
-            save_status(is_b64 and ("Base64 (" .. #links .. ")") or ("Текст (" .. #links .. ")"))
-            log(string.format("=== Обновление %s завершено успешно (%s)! ===", sub_id, trigger_desc))
+    local hdr_file = "/tmp/sub_headers_" .. sid .. ".tmp"
+    local resp_raw = fetch_subscription(sid, url, ua, hwid, dev_os, dev_model, hdr_file)
+    local uinfo_str = parse_userinfo(hdr_file)
+    if uinfo_str then
+        uci_write(function(u)
+            u:set("subconv", sid, "userinfo", uinfo_str)
+        end)
+    end
+
+    if not resp_raw or #resp_raw < 3 then
+        return false, "network timeout", "Ошибка сети"
+    end
+
+    local http_code = resp_raw:sub(-3)
+    local resp = resp_raw:sub(1, -4)
+
+    if #resp == 0 then
+        return false, "HTTP " .. http_code .. " (empty)", "Ошибка (HTTP " .. http_code .. ")"
+    end
+
+    local decoded = resp
+    local is_b64 = false
+    local b64_dec = nixio.bin.b64decode(resp)
+    if b64_dec and (b64_dec:match("://") or b64_dec:match("^%s*{") or b64_dec:match("^%s*%[") or b64_dec:match("proxies:") or b64_dec:match("^happ://")) then
+        decoded = b64_dec
+        is_b64 = true
+    end
+
+    local is_raw = decoded:match("^%s*{") or decoded:match("^%s*%[") or decoded:match("proxies:")
+    if is_raw then
+        if write_to_file(out_path, decoded) then
+            return true, string.format("OK: %s, JSON/YAML (%s)", http_code, trig_label), 1, "JSON/YAML"
         else
-            exit_with_error("Не удалось записать файл " .. out_path, "Ошибка записи")
+            return false, "write error", "Ошибка записи"
         end
     else
-        local snippet = decoded:sub(1, 50):gsub("[%c\n\r]", " ")
-        exit_with_error("Узлы не найдены. Начало ответа: " .. snippet, "Пусто (Нет узлов)")
+        local links = {}
+        for line in decoded:gmatch("[^\r\n]+") do
+            line = line:match("^%s*(.-)%s*$")
+            if line and (line:match("://") or line:match("^happ://")) then
+                table.insert(links, line)
+            end
+        end
+
+        if #links > 0 then
+            if write_to_file(out_path, table.concat(links, "\n") .. "\n") then
+                local uci_stat = is_b64 and ("Base64 (" .. #links .. ")") or ("Текст (" .. #links .. ")")
+                return true, string.format("OK: %s, %d nodes (%s)", http_code, #links, trig_label), #links, uci_stat
+            else
+                return false, "write error", "Ошибка записи"
+            end
+        else
+            return false, "no nodes found (HTTP " .. http_code .. ")", "Пусто (Нет узлов)"
+        end
     end
 end
 
-end -- main
+-- Точка входа в скрипт
+local function main()
+    local trig_label = "manual"
+    if trigger_type == "cron" then trig_label = "cron"
+    elseif trigger_type == "manual_all" or trigger_type == "all" then trig_label = "all"
+    elseif trigger_type == "cli" then trig_label = "cli"
+    end
 
--- Страховка: любая непредвиденная ошибка Lua попадает в журнал и в статус подписки,
--- а не оставляет её навсегда в состоянии "Обновление..."
+    if sub_id == "--all" then
+        local ids = {}
+        uci:foreach("subconv", "subscription", function(s)
+            ids[#ids + 1] = s[".name"]
+        end)
+
+        if #ids == 0 then return end
+
+        local t_start = os.time()
+        local ok_cnt, total_nodes = 0, 0
+
+        for _, id in ipairs(ids) do
+            local ok, res_msg, count_val, uci_stat = update_single_sub(id, trig_label)
+            if ok then
+                ok_cnt = ok_cnt + 1
+                if type(count_val) == "number" then
+                    total_nodes = total_nodes + count_val
+                end
+                save_status(id, uci_stat or "OK")
+            else
+                save_status(id, uci_stat or "Ошибка")
+                add_log(id, "ERR: " .. res_msg, true)
+            end
+        end
+
+        local elapsed = os.time() - t_start
+        local summary_msg = string.format("%d/%d updated, %d nodes in %ds (%s)", ok_cnt, #ids, total_nodes, elapsed, trig_label)
+        add_log("ALL", summary_msg, false)
+        flush_logs()
+        return
+    end
+
+    if not sub_id or sub_id == "" then
+        add_log("SYS", "ERR: missing subscription ID", true)
+        flush_logs()
+        os.exit(1)
+    end
+
+    local ok, res_msg, count_val, uci_stat = update_single_sub(sub_id, trig_label)
+    if ok then
+        save_status(sub_id, uci_stat or "OK")
+        add_log(sub_id, res_msg, false)
+    else
+        save_status(sub_id, uci_stat or "Ошибка")
+        add_log(sub_id, "ERR: " .. res_msg, true)
+    end
+    flush_logs()
+    if not ok then os.exit(1) end
+end
+
 local ok, err = xpcall(main, debug.traceback)
 if not ok then
-    log("КРИТИЧЕСКАЯ ОШИБКА СКРИПТА: " .. tostring(err):gsub("[\r\n]+", " | "))
-    pcall(save_status, "Ошибка скрипта")
+    local err_str = tostring(err):gsub("[\r\n]+", " | "):sub(1, 120)
+    add_log(sub_id or "SYS", "CRITICAL: " .. err_str, true)
+    flush_logs()
+    if sub_id and sub_id ~= "--all" then pcall(save_status, sub_id, "Ошибка скрипта") end
     os.exit(1)
 end
 EOF
@@ -527,6 +600,7 @@ function index()
     entry({"admin", "services", "subconv", "status"}, call("action_status")).leaf = true
     entry({"admin", "services", "subconv", "update_ajax"}, call("action_update_ajax")).leaf = true
     entry({"admin", "services", "subconv", "set_param"}, call("action_set_param")).leaf = true
+    entry({"admin", "services", "subconv", "set_log_size"}, call("action_set_log_size")).leaf = true
     entry({"admin", "services", "subconv", "clear_log"}, call("action_clear_log")).leaf = true
 end
 
@@ -649,27 +723,18 @@ function action_update_ajax()
     os.remove("/tmp/subconv_status.json")
 
     if update_all == "1" then
-        -- 1) Сначала собираем ID подписок (конфигурацию внутри foreach не меняем)
         local ids = {}
         uci:foreach("subconv", "subscription", function(s)
             ids[#ids + 1] = s[".name"]
         end)
 
         if #ids > 0 then
-            -- 2) Помечаем все подписки одним коммитом ДО запуска обновления
             for _, id in ipairs(ids) do
                 uci:set("subconv", id, "last_type", "Обновление...")
             end
             uci:commit("subconv")
 
-            -- 3) Один фоновый процесс обновляет подписки строго по очереди:
-            --    параллельные записи в UCI теряли статусы, а провайдер видел несколько
-            --    одновременных запросов с одним и тем же HWID
-            local cmds = {}
-            for _, id in ipairs(ids) do
-                cmds[#cmds + 1] = "/usr/libexec/subconv-update.sh " .. util.shellquote(id) .. " manual_all"
-            end
-            sys.call("( " .. table.concat(cmds, "; ") .. " ) >/dev/null 2>&1 </dev/null &")
+            sys.call("/usr/libexec/subconv-update.sh --all manual >/dev/null 2>&1 </dev/null &")
         end
 
         http.prepare_content("application/json")
@@ -719,9 +784,47 @@ function action_set_param()
     http.write('{"status":"error"}')
 end
 
+function action_set_log_size()
+    local http = require "luci.http"
+    local size_kb = tonumber(http.formvalue("size_kb"))
+    if size_kb and size_kb >= 32 and size_kb <= 51200 then
+        local u = require("luci.model.uci").cursor()
+        u:set("subconv", "add", "max_log_size_kb", tostring(size_kb))
+        u:commit("subconv")
+
+        local log_path = "/tmp/subconv_debug.log"
+        local f = io.open(log_path, "r")
+        if f then
+            local sz = f:seek("end")
+            local max_b = size_kb * 1024
+            if sz and sz > max_b then
+                local keep_b = math.floor(max_b * 0.75)
+                f:seek("set", math.max(0, sz - keep_b))
+                local chunk = f:read("*all") or ""
+                f:close()
+                local nl = chunk:find("\n")
+                if nl then chunk = chunk:sub(nl + 1) end
+                local fw = io.open(log_path, "w")
+                if fw then fw:write(chunk); fw:close() end
+            else
+                f:close()
+            end
+        end
+
+        http.prepare_content("application/json")
+        http.write('{"status":"ok","size_kb":' .. size_kb .. '}')
+        return
+    end
+
+    http.prepare_content("application/json")
+    http.write('{"status":"error"}')
+end
+
 function action_clear_log()
     local http = require "luci.http"
-    os.remove("/www/subconv_debug.txt")
+    local f = io.open("/tmp/subconv_debug.log", "w")
+    if f then f:close() end
+    os.execute("rm -f /www/subconv_debug.txt && ln -sf /tmp/subconv_debug.log /www/subconv_debug.txt 2>/dev/null")
     http.prepare_content("application/json")
     http.write('{"status":"ok"}')
 end
@@ -780,18 +883,43 @@ end
 local sys_os, sys_model, sys_hwid, random_hwid = get_sys_info()
 
 local function append_subconv_log(tag, msg)
-    local f = io.open("/www/subconv_debug.txt", "a")
+    local max_kb = tonumber(uci:get("subconv", "add", "max_log_size_kb")) or 1024
+    local log_path = "/tmp/subconv_debug.log"
+    local ts = os.date("%y-%m-%d %H:%M")
+    local f = io.open(log_path, "a")
     if f then
-        local ts = os.date("%Y-%m-%d %H:%M:%S")
-        f:write(string.format("%s [%s] %s\n", ts, tag or "system", msg))
+        f:write(string.format("%s [%s] %s\n", ts, tag or "SYS", msg))
         f:close()
+    end
+
+    local stat = nixio.fs.lstat("/www/subconv_debug.txt")
+    if not stat or stat.type ~= "lnk" then
+        os.execute("ln -sf /tmp/subconv_debug.log /www/subconv_debug.txt 2>/dev/null")
+    end
+
+    local f_chk = io.open(log_path, "r")
+    if f_chk then
+        local sz = f_chk:seek("end")
+        local max_b = max_kb * 1024
+        if sz and sz > max_b then
+            local keep_b = math.floor(max_b * 0.75)
+            f_chk:seek("set", math.max(0, sz - keep_b))
+            local rest = f_chk:read("*all") or ""
+            f_chk:close()
+            local nl = rest:find("\n")
+            if nl then rest = rest:sub(nl + 1) end
+            local fw = io.open(log_path, "w")
+            if fw then fw:write(rest); fw:close() end
+        else
+            f_chk:close()
+        end
     end
 end
 
 -- ==========================================
 -- Константы для HTML и JavaScript
 -- ==========================================
-local current_ver = "0.3.16"
+local current_ver = "0.3.17"
 
 local title_html = [[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;" id="plugin-ver-text">v]] .. current_ver .. [[</span> <button type="button" class="cbi-button" style="margin-left: 10px; font-size: 12px; padding: 2px 6px;" id="btn-check-ver" onclick="checkPluginVersion()">Проверить обновления</button><button type="button" class="cbi-button cbi-button-apply" style="margin-left: 5px; font-size: 12px; padding: 2px 6px; display: none;" id="btn-do-update" onclick="doPluginUpdate()">Обновить</button>]]
 
@@ -1499,6 +1627,89 @@ local JS_TWEAKS_PART2 = [===[';
                 logHdr.style.gap = '10px';
                 btnClear.style.cssText = 'margin: 0; font-size: 12px; padding: 3px 10px; height: 26px; line-height: 18px; cursor: pointer; vertical-align: middle;';
                 logHdr.appendChild(btnClear);
+
+                if (!document.getElementById('subconv-log-size-wrap')) {
+                    var sizeWrap = document.createElement('div');
+                    sizeWrap.id = 'subconv-log-size-wrap';
+                    sizeWrap.style.cssText = 'display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; font-size: 12px; font-weight: normal;';
+
+                    var sizeLabel = document.createElement('span');
+                    sizeLabel.innerText = 'Макс. размер:';
+                    sizeLabel.style.opacity = '0.85';
+
+                    var sizeSel = document.createElement('select');
+                    sizeSel.id = 'subconv-max-log-size';
+                    sizeSel.className = 'cbi-input-select';
+                    sizeSel.style.cssText = 'font-size: 12px; height: 26px; padding: 2px 6px; border-radius: 3px; cursor: pointer;';
+
+                    var presets = [
+                        { v: '128', t: '128 КБ' },
+                        { v: '256', t: '256 КБ' },
+                        { v: '512', t: '512 КБ' },
+                        { v: '1024', t: '1024 КБ' },
+                        { v: '2048', t: '2048 КБ' },
+                        { v: '4096', t: '4096 КБ' }
+                    ];
+
+                    var logEl = document.getElementById('subconv-debug-log');
+                    var curKb = (logEl && logEl.getAttribute('data-max-kb')) || '1024';
+                    var found = false;
+                    presets.forEach(function(p) {
+                        var opt = document.createElement('option');
+                        opt.value = p.v;
+                        opt.innerText = p.t;
+                        if (p.v === curKb) { opt.selected = true; found = true; }
+                        sizeSel.appendChild(opt);
+                    });
+                    if (!found) {
+                        var customOpt = document.createElement('option');
+                        customOpt.value = curKb;
+                        customOpt.innerText = curKb + ' КБ';
+                        customOpt.selected = true;
+                        sizeSel.insertBefore(customOpt, sizeSel.firstChild);
+                    }
+
+                    var customChoice = document.createElement('option');
+                    customChoice.value = 'custom';
+                    customChoice.innerText = 'Свой...';
+                    sizeSel.appendChild(customChoice);
+
+                    sizeSel.onchange = function() {
+                        var val = sizeSel.value;
+                        if (val === 'custom') {
+                            var inputVal = prompt('Введите максимальный размер лога в КБ (от 32 до 51200):', curKb);
+                            if (!inputVal || isNaN(parseInt(inputVal))) {
+                                sizeSel.value = curKb;
+                                return;
+                            }
+                            val = parseInt(inputVal).toString();
+                            var newOpt = document.createElement('option');
+                            newOpt.value = val;
+                            newOpt.innerText = val + ' КБ';
+                            newOpt.selected = true;
+                            sizeSel.insertBefore(newOpt, sizeSel.firstChild);
+                        }
+                        curKb = val;
+                        var setUrl = window.location.pathname.replace(/\/+$/, '') + '/set_log_size';
+                        var fd = new FormData();
+                        fd.append('size_kb', val);
+                        fetch(setUrl, { method: 'POST', body: fd, cache: 'no-store' })
+                            .then(function(r) { return r.json(); })
+                            .then(function(res) {
+                                if (res.status === 'ok') {
+                                    showToast('Макс. размер лога: ' + val + ' КБ');
+                                    var curLog = document.getElementById('subconv-debug-log');
+                                    if (curLog) curLog.setAttribute('data-max-kb', val);
+                                    updateLogContent();
+                                }
+                            })
+                            .catch(function() {});
+                    };
+
+                    sizeWrap.appendChild(sizeLabel);
+                    sizeWrap.appendChild(sizeSel);
+                    logHdr.appendChild(sizeWrap);
+                }
 
                 // Очистка лога через AJAX без перезагрузки страницы
                 btnClear.onclick = function(e) {
@@ -2299,9 +2510,9 @@ function btn_add.write(self, section)
     end)
 
     if dup_sub then
-        append_subconv_log(new_id, string.format("Подписка успешно добавлена (подтвержден дубликат URL подписки '%s'). URL=%s | UA=%s | HWID=%s", dup_sub, masked_u, new_ua, new_hwid))
+        append_subconv_log(new_id, string.format("ADD: ok (dup of '%s')", dup_sub))
     else
-        append_subconv_log(new_id, string.format("Подписка успешно добавлена. URL=%s | UA=%s | HWID=%s", masked_u, new_ua, new_hwid))
+        append_subconv_log(new_id, "ADD: ok")
     end
 
     sys.call("/usr/libexec/subconv-cron.sh")
@@ -2521,7 +2732,7 @@ local btn_del_list = s_list:option(Button, "_delete", translate(" "))
 btn_del_list.inputtitle = "🗑️"
 btn_del_list.inputstyle = "remove"
 function btn_del_list.write(self, section)
-    append_subconv_log(section, "Подписка удалена пользователем.")
+    append_subconv_log(section, "DEL: ok")
     os.execute("rm -f " .. util.shellquote("/www/" .. section .. ".txt"))
     uci:delete("subconv", section)
     uci:commit("subconv")
@@ -2542,20 +2753,23 @@ local btn_clear = s_log:option(Button, "_clear_log", "")
 btn_clear.inputtitle = translate("Очистить лог")
 btn_clear.inputstyle = "remove"
 function btn_clear.write(self, section)
-    os.execute("rm -f /www/subconv_debug.txt")
+    local f = io.open("/tmp/subconv_debug.log", "w")
+    if f then f:close() end
+    os.execute("rm -f /www/subconv_debug.txt && ln -sf /tmp/subconv_debug.log /www/subconv_debug.txt 2>/dev/null")
     http.redirect(dsp.build_url("admin", "services", "subconv"))
 end
 
--- Просмотрщик логов (читает файл /www/subconv_debug.txt)
+-- Просмотрщик логов (читает файл /tmp/subconv_debug.log)
 local log_view = s_log:option(DummyValue, "_logview")
 log_view.rawhtml = true
 function log_view.cfgvalue(self, section)
-    local f = io.open("/www/subconv_debug.txt", "r")
-    local content = f and f:read("*all") or "Лог пуст. Нажмите 🔄 на любой подписке."
+    local max_kb = uci:get("subconv", "add", "max_log_size_kb") or "1024"
+    local f = io.open("/tmp/subconv_debug.log", "r") or io.open("/www/subconv_debug.txt", "r")
+    local content = f and f:read("*all") or "Log is empty. Click 🔄 to update."
     if f then f:close() end
     content = content:gsub("<", "&lt;"):gsub(">", "&gt;")
     -- Вывод логов в полноразмерный терминал с автопрокруткой вниз
-    return '<textarea id="subconv-debug-log" readonly wrap="off" style="width: 100%; max-width: 100%; min-width: 100%; height: 350px; background: #1a1b26; color: #a9b1d6; font-family: monospace; font-size: 13px; padding: 10px; border: 1px solid #333; margin-top: 10px; box-sizing: border-box; display: block; border-radius: 4px;">' .. content .. '</textarea><script>setTimeout(function(){var l=document.getElementById("subconv-debug-log");if(l){l.scrollTop=l.scrollHeight;}}, 100);</script>'
+    return '<textarea id="subconv-debug-log" data-max-kb="' .. max_kb .. '" readonly wrap="off" style="width: 100%; max-width: 100%; min-width: 100%; height: 350px; background: #1a1b26; color: #a9b1d6; font-family: monospace; font-size: 13px; padding: 10px; border: 1px solid #333; margin-top: 10px; box-sizing: border-box; display: block; border-radius: 4px;">' .. content .. '</textarea><script>setTimeout(function(){var l=document.getElementById("subconv-debug-log");if(l){l.scrollTop=l.scrollHeight;}}, 100);</script>'
 end
 
 -- ==========================================
@@ -2580,6 +2794,10 @@ if [ ! -f /etc/config/subconv ]; then
 elif ! grep -q "config global 'add'" /etc/config/subconv; then
     echo "config global 'add'" >> /etc/config/subconv
 fi
+
+touch /tmp/subconv_debug.log
+rm -f /www/subconv_debug.txt
+ln -sf /tmp/subconv_debug.log /www/subconv_debug.txt
 
 rm -rf /tmp/luci-* /tmp/rpcd-* /tmp/state/*
 /etc/init.d/rpcd restart
