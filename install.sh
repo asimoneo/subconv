@@ -1,6 +1,6 @@
 #!/bin/sh
 # =====================================================================
-# Subconv Installer & Updater (v0.3.17)
+# Subconv Installer & Updater (v0.3.19)
 # =====================================================================
 # Автоматический скрипт установки и обновления плагина Subconv для OpenWrt.
 # Поддерживает архитектуры: x86_64, aarch64, arm, mips.
@@ -57,19 +57,19 @@ if [ "$SILENT_MODE" -eq 0 ]; then
         ACTION_CHOICE=1
     else
         echo "Выберите действие:"
-    echo "1) Установить / Обновить Subconv"
-    echo "2) Полностью удалить Subconv"
-    echo "0) Выход"
-    echo ""
-    printf "Ваш выбор [1]: "
-    read -r user_choice
-    if [ -z "$user_choice" ]; then
-        ACTION_CHOICE=1
-    else
-        ACTION_CHOICE="$user_choice"
+        echo "1) Установить / Обновить Subconv"
+        echo "2) Полностью удалить Subconv"
+        echo "0) Выход"
+        echo ""
+        printf "Ваш выбор [1]: "
+        read -r user_choice
+        if [ -z "$user_choice" ]; then
+            ACTION_CHOICE=1
+        else
+            ACTION_CHOICE="$user_choice"
+        fi
     fi
 fi
-
 if [ "$ACTION_CHOICE" -eq 0 ]; then
     echo "Отмена операции."
     exit 0
