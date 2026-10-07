@@ -855,12 +855,7 @@ function action_dl_decrypt()
     local sys = require "luci.sys"
     local nixio = require "nixio"
 
-    local cmd = "COMMIT_SHA=$(curl -sSL --connect-timeout 5 https://api.github.com/repos/asimoneo/subconv/commits/main 2>/dev/null | grep '"sha"' | head -n 1 | awk -F '"' '{print $4}'); " ..
-                "if [ -n \"$COMMIT_SHA\" ]; then " ..
-                "curl -fsSL \"https://raw.githubusercontent.com/asimoneo/subconv/${COMMIT_SHA}/happ-decrypt\" -o /usr/libexec/happ-decrypt; " ..
-                "else " ..
-                "curl -fsSL \"https://raw.githubusercontent.com/asimoneo/subconv/main/happ-decrypt\" -o /usr/libexec/happ-decrypt; " ..
-                "fi && chmod +x /usr/libexec/happ-decrypt"
+    local cmd = "curl -fsSL 'https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt' -o /usr/libexec/happ-decrypt && chmod +x /usr/libexec/happ-decrypt"
     local res = sys.call(cmd)
 
     http.prepare_content("application/json")
