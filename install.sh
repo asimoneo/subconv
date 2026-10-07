@@ -1,12 +1,12 @@
 #!/bin/sh
 # =====================================================================
-# Subconv Installer & Updater (v0.3.18)
+# Subconv Installer & Updater (v0.3.17)
 # =====================================================================
 # Автоматический скрипт установки и обновления плагина Subconv для OpenWrt.
 # Поддерживает архитектуры: x86_64, aarch64, arm, mips.
 # =====================================================================
 
-VERSION="0.3.18"
+VERSION="0.3.19"
 
 # Цвета для вывода в терминал
 RED='\033[0;31m'
@@ -52,7 +52,11 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$SILENT_MODE" -eq 0 ]; then
-    echo "Выберите действие:"
+    if [ ! -t 0 ]; then
+        SILENT_MODE=1
+        ACTION_CHOICE=1
+    else
+        echo "Выберите действие:"
     echo "1) Установить / Обновить Subconv"
     echo "2) Полностью удалить Subconv"
     echo "0) Выход"
@@ -140,6 +144,11 @@ mkdir -p /usr/lib/lua/luci/controller
 mkdir -p /usr/lib/lua/luci/model/cbi
 mkdir -p /usr/share/luci/menu.d
 mkdir -p /usr/share/rpcd/acl.d
+
+if [ ! -f /usr/libexec/happ-decrypt ]; then
+    echo "📦 Загрузка дешифратора happ-decrypt..."
+    curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt" -o /usr/libexec/happ-decrypt 2>/dev/null && chmod +x /usr/libexec/happ-decrypt || true
+fi
 
 cat << 'EOF' > /usr/libexec/subconv-update.sh
 #!/usr/bin/lua
@@ -841,6 +850,27 @@ function action_clear_log()
     http.write('{"status":"ok"}')
 end
 
+function action_dl_decrypt()
+    local http = require "luci.http"
+    local sys = require "luci.sys"
+    local nixio = require "nixio"
+
+    local cmd = "COMMIT_SHA=$(curl -sSL --connect-timeout 5 https://api.github.com/repos/asimoneo/subconv/commits/main 2>/dev/null | grep '"sha"' | head -n 1 | awk -F '"' '{print $4}'); " ..
+                "if [ -n \"$COMMIT_SHA\" ]; then " ..
+                "curl -fsSL \"https://raw.githubusercontent.com/asimoneo/subconv/${COMMIT_SHA}/happ-decrypt\" -o /usr/libexec/happ-decrypt; " ..
+                "else " ..
+                "curl -fsSL \"https://raw.githubusercontent.com/asimoneo/subconv/main/happ-decrypt\" -o /usr/libexec/happ-decrypt; " ..
+                "fi && chmod +x /usr/libexec/happ-decrypt"
+    local res = sys.call(cmd)
+
+    http.prepare_content("application/json")
+    if res == 0 and nixio.fs.stat("/usr/libexec/happ-decrypt") then
+        http.write('{"status":"ok"}')
+    else
+        http.write('{"status":"error","message":"Не удалось загрузить бинарник с GitHub"}')
+    end
+end
+
 function action_self_update()
     local http = require "luci.http"
     local sys = require "luci.sys"
@@ -859,35 +889,6 @@ function action_self_update()
         if f_log then f_log:close() end
         local snippet = log_err:sub(1, 300):gsub("[%c\r\n]", " ")
         http.write('{"status":"error","message":"' .. snippet:gsub('"', '\\"') .. '"}')
-    end
-end
-
-function action_dl_decrypt()
-    local http = require "luci.http"
-    local sys = require "luci.sys"
-    local nixio = require "nixio"
-
-    local cmd = "COMMIT_SHA=$(curl -sSL --connect-timeout 5 https://api.github.com/repos/asimoneo/subconv/commits/main 2>/dev/null | grep '\"sha\"' | head -n 1 | awk -F '\"' '{print $4}'); " ..
-                "if [ -n \"$COMMIT_SHA\" ]; then " ..
-                "curl -fsSL \"https://raw.githubusercontent.com/asimoneo/subconv/${COMMIT_SHA}/happ-decrypt\" -o /usr/libexec/happ-decrypt; " ..
-                "else " ..
-                "curl -fsSL \"https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt\" -o /usr/libexec/happ-decrypt; " ..
-                "fi; chmod +x /usr/libexec/happ-decrypt"
-    sys.call(cmd)
-
-    local bin_path = "/usr/libexec/happ-decrypt"
-    local bin_ver = nil
-    if nixio.fs.access(bin_path) then
-        local v_handle = io.popen(bin_path .. " --version 2>/dev/null")
-        bin_ver = v_handle and v_handle:read("*l") or "unknown"
-        if v_handle then v_handle:close() end
-    end
-
-    http.prepare_content("application/json")
-    if bin_ver then
-        http.write(string.format('{"status":"ok","version":"%s"}', bin_ver:gsub('"', '\\"')))
-    else
-        http.write('{"status":"error","message":"Не удалось загрузить дешифратор"}')
     end
 end
 EOF
@@ -981,608 +982,503 @@ end
 -- ==========================================
 -- Константы для HTML и JavaScript
 -- ==========================================
-local current_ver = "0.3.18"
+local current_ver = "0.3.19"
 
-local title_html = [[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;" id="plugin-ver-text">v]] .. current_ver .. [[</span> <button type="button" class="cbi-button" style="padding: 3px 6px; font-size: 13px; margin-left: 8px; min-width: 28px; width: 28px; height: 28px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; vertical-align: middle; cursor: pointer;" id="btn-check-ver" onclick="checkPluginVersion()" title="Проверить обновления плагина">🔄</button><button type="button" class="cbi-button cbi-button-apply" style="padding: 3px 6px; font-size: 13px; margin-left: 6px; min-width: 28px; width: 28px; height: 28px; line-height: 20px; display: none; align-items: center; justify-content: center; box-sizing: border-box; vertical-align: middle; cursor: pointer; background: #2563eb; border-color: #3b82f6;" id="btn-do-update" onclick="doPluginUpdate()" title="Установить обновление плагина">📥</button>]]
+local title_html = [[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;" id="plugin-ver-text">v]] .. current_ver .. [[</span> <button type="button" class="cbi-button" style="padding: 3px 6px; font-size: 13px; margin-left: 8px; min-width: 28px; width: 28px; height: 28px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; vertical-align: middle; cursor: pointer;" id="btn-check-ver" onclick="checkPluginVersion()" title="Проверить обновления плагина">🔄</button><button type="button" class="cbi-button cbi-button-apply" style="padding: 4px 12px; font-size: 13px; margin-left: 10px; height: 30px; line-height: 20px; display: none; align-items: center; gap: 5px; box-sizing: border-box; vertical-align: middle; cursor: pointer; background: #2563eb; border: 1px solid #3b82f6; color: #fff; border-radius: 4px; font-weight: 500;" id="btn-do-update" onclick="doPluginUpdate()" title="Установить обновление плагина">📥 Обновить плагин</button>]]
 
 local CSS_TWEAKS = [===[<style>
-  /* 1. Выделение и плавная анимация (0.8с) раскрытия формы добавления */
-  .subconv-add-section.expanded,
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]).expanded {
-    max-height: 900px !important;
-    opacity: 1 !important;
-    overflow: visible !important;
-    visibility: visible !important;
-    border: 1px solid rgba(16, 185, 129, 0.45) !important;
-    background: rgba(16, 185, 129, 0.03) !important;
-    border-radius: 8px !important;
-    padding: 15px 20px 20px 20px !important;
-    margin-top: 15px !important;
-    margin-bottom: 25px !important;
-    box-shadow: 0 4px 16px rgba(16, 185, 129, 0.08) !important;
-    transition: max-height 0.8s cubic-bezier(0.4, 0, 0.2, 1),
-                opacity 0.8s ease,
-                padding 0.8s ease,
-                margin 0.8s ease !important;
-  }
-  .subconv-add-section:not(.expanded),
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]):not(.expanded) {
-    max-height: 0 !important;
-    opacity: 0 !important;
-    overflow: hidden !important;
-    padding-top: 0 !important;
-    padding-bottom: 0 !important;
-    margin-top: 0 !important;
-    margin-bottom: 0 !important;
-    border-top-width: 0 !important;
-    border-bottom-width: 0 !important;
-    border-left: 1px solid transparent !important;
-    border-right: 1px solid transparent !important;
-    pointer-events: none !important;
-    visibility: hidden !important;
-    transition: max-height 0.8s cubic-bezier(0.4, 0, 0.2, 1),
-                opacity 0.6s ease,
-                padding 0.8s ease,
-                margin 0.8s ease,
-                visibility 0.8s !important;
-  }
-
-  /* Скрываем дублирующий/внешний заголовок формы */
-  .subconv-add-section h3,
-  .subconv-add-section legend,
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) > h3,
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) > legend {
-    display: none !important;
-  }
-
-  /* 2. Поля формы добавления: единая ширина 250px, подсказки справа */
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field {
-    display: flex !important;
-    flex-direction: row !important;
-    align-items: center !important;
-    gap: 15px !important;
-    flex-wrap: nowrap !important;
-  }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field > input:not(.cbi-button),
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field > select,
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field > .cbi-dropdown,
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field > cbi-dropdown {
-    width: 250px !important;
-    max-width: 250px !important;
-    min-width: 250px !important;
-    flex: 0 0 250px !important;
-    box-sizing: border-box !important;
-  }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-description {
-    margin: 0 !important;
-    padding: 0 !important;
-    opacity: 0.8 !important;
-    font-size: 12px !important;
-    white-space: nowrap !important;
-    flex: 1 1 auto !important;
-  }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-dropdown ul > li {
-    white-space: normal !important;
-    line-height: 1.3 !important;
-  }
-
-  /* 3. Кнопка проверки версии в шапке */
-  #btn-check-ver, #btn-do-update {
-    font-size: 13px !important;
-    padding: 4px 10px !important;
-    height: 30px !important;
-    line-height: 20px !important;
-    box-sizing: border-box !important;
-    vertical-align: middle !important;
-  }
-
-  /* 4. Дешифратор в строке заголовка Активные подписки */
-  #subconv-decrypt-bar {
-    display: inline-flex !important;
-    align-items: center !important;
-    gap: 8px !important;
-    margin: 0 0 0 15px !important;
-    padding: 0 !important;
-    background: transparent !important;
-    border: none !important;
-    box-shadow: none !important;
-    font-size: 13px !important;
-    font-weight: normal !important;
-    vertical-align: middle !important;
-  }
-  #subconv-decrypt-bar::before {
-    content: "|" !important;
-    opacity: 0.3 !important;
-    margin-right: 6px !important;
-    font-weight: normal !important;
-  }
-  #subconv-decrypt-bar .cbi-value-title {
-    width: auto !important;
-    padding: 0 !important;
-    margin: 0 !important;
-    font-size: 13px !important;
-    font-weight: 500 !important;
-    opacity: 0.9 !important;
-    display: inline !important;
-  }
-  #subconv-decrypt-bar .cbi-value-field {
-    display: inline-flex !important;
-    align-items: center !important;
-    gap: 8px !important;
-    width: auto !important;
-    margin: 0 !important;
-    padding: 0 !important;
-  }
-  #subconv-decrypt-bar .cbi-value-description {
-    margin: 0 !important;
-    padding: 0 !important;
-    font-size: 12px !important;
-    white-space: nowrap !important;
-  }
-  #subconv-decrypt-bar .cbi-button {
-    margin: 0 !important;
-    font-size: 12px !important;
-    padding: 3px 10px !important;
-    height: 26px !important;
-    line-height: 18px !important;
-  }
-
-  /* ========================================================= */
-  /* 5. ПОЛНОСТЬЮ ПЕРЕВЕРСТАННАЯ ТАБЛИЦА АКТИВНЫХ ПОДПИСОК      */
-  /* ========================================================= */
-  .cbi-section-table {
-    width: 100% !important;
-    max-width: 100% !important;
-    table-layout: auto !important;
-    border-collapse: separate !important;
-    border-spacing: 0 !important;
-    box-sizing: border-box !important;
-  }
-  .cbi-section-table th,
-  .cbi-section-table td {
-    padding: 6px 4px !important;
-    vertical-align: middle !important;
-    text-align: left !important;
-    box-sizing: border-box !important;
-  }
-  .cbi-section-table th {
-    font-size: 12px !important;
-    font-weight: 600 !important;
-    opacity: 0.85 !important;
-    white-space: nowrap !important;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
-  }
-  .cbi-section-table tr.cbi-section-table-row td,
-  .cbi-section-table tr[class*="cbi-section-table-row"] td {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
-  }
-
-  /* Интерактивные кликабельные поля: обводка и фон только при :hover */
-  .subconv-code-cell {
-    display: inline-block !important;
-    position: relative !important;
-    max-width: 100% !important;
-    padding: 2px 5px !important;
-    border-radius: 4px !important;
-    border: 1px solid transparent !important;
-    background: transparent !important;
-    font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace !important;
-    font-size: 11px !important;
-    line-height: 1.25 !important;
-    cursor: pointer !important;
-    transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease !important;
-    box-sizing: border-box !important;
-    user-select: none !important;
-  }
-  .subconv-code-cell:hover {
-    border: 1px solid rgba(125, 125, 125, 0.35) !important;
-    background: rgba(125, 125, 125, 0.12) !important;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15) !important;
-  }
-
-  @keyframes subconvCellGhost {
-    0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
-    20% { transform: scale(1.04); text-shadow: -4px 0 3px rgba(59, 130, 246, 0.95), 4px 0 3px rgba(16, 185, 129, 0.95); box-shadow: -3px 0 0 1px rgba(59, 130, 246, 0.6), 3px 0 0 1px rgba(16, 185, 129, 0.6); }
-    45% { transform: scale(1.03); text-shadow: -5px 0 5px rgba(59, 130, 246, 0.8), 5px 0 5px rgba(16, 185, 129, 0.8); box-shadow: 0 0 14px rgba(16, 185, 129, 0.65); }
-    70% { transform: scale(1.01); text-shadow: -2px 0 2px rgba(59, 130, 246, 0.5), 2px 0 2px rgba(16, 185, 129, 0.5); }
-    100% { transform: scale(1); text-shadow: none; box-shadow: none; }
-  }
-  .subconv-cell-copied {
-    animation: subconvCellGhost 0.6s ease-out !important;
-  }
-
-  .subconv-copied-badge {
-    position: absolute !important;
-    top: -26px !important;
-    left: 50% !important;
-    transform: translateX(-50%) !important;
-    background: #059669 !important;
-    color: #ffffff !important;
-    font-size: 11px !important;
-    font-weight: 600 !important;
-    padding: 2px 8px !important;
-    border-radius: 4px !important;
-    white-space: nowrap !important;
-    pointer-events: none !important;
-    z-index: 1000 !important;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important;
-    animation: subconvBadgeFloat 1.2s ease-out forwards !important;
-  }
-  @keyframes subconvBadgeFloat {
-    0% { opacity: 0; transform: translate(-50%, 4px) scale(0.85); }
-    15% { opacity: 1; transform: translate(-50%, 0) scale(1); }
-    75% { opacity: 1; transform: translate(-50%, -2px) scale(1); }
-    100% { opacity: 0; transform: translate(-50%, -10px) scale(0.9); }
-  }
-
-  .subconv-spin {
-    display: inline-block !important;
-    animation: subconvSpin 1s linear infinite !important;
-  }
-  @keyframes subconvSpin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
-  }
-
-  /* Пустая таблица подписок: центрированное сообщение на всю ширину без полосок */
-  .cbi-section-table tr.cbi-section-table-empty,
-  .cbi-section-table tr.cbi-section-table-row.cbi-section-table-empty {
-    background: transparent !important;
-    border: none !important;
-  }
-  .cbi-section-table tr.cbi-section-table-empty td,
-  .cbi-section-table td.cbi-section-table-empty,
-  .cbi-section-table-empty td {
-    width: 100% !important;
-    min-width: 100% !important;
-    max-width: none !important;
-    text-align: center !important;
-    padding: 24px 10px !important;
-    border: none !important;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
-    pointer-events: none !important;
-    user-select: none !important;
-    cursor: default !important;
-    color: rgba(255, 255, 255, 0.45) !important;
-    font-style: italic !important;
-    font-size: 12px !important;
-  }
-
-  /* Кол 1 (URL): комфортный размер без растягивания таблицы */
-  .cbi-section-table th:nth-child(1),
-  .cbi-section-table td:nth-child(1):not(.cbi-section-table-empty) {
-    width: 155px !important;
-    min-width: 135px !important;
-    max-width: 175px !important;
-  }
-  .cbi-section-table td:nth-child(1):not(.cbi-section-table-empty) .subconv-code-cell {
-    word-break: break-all !important;
-  }
-
-  /* Кол 2 (User-Agent): родной выпадающий список LuCI (cbi-dropdown) */
-  .cbi-section-table th:nth-child(2),
-  .cbi-section-table td:nth-child(2) {
-    width: 140px !important;
-    min-width: 130px !important;
-    max-width: 155px !important;
-    overflow: visible !important;
-  }
-  .cbi-section-table td:nth-child(2) cbi-dropdown,
-  .cbi-section-table td:nth-child(2) .cbi-dropdown,
-  .cbi-section-table td:nth-child(2) select {
-    width: 100% !important;
-    min-width: 0 !important;
-    max-width: 140px !important;
-    box-sizing: border-box !important;
-  }
-  /* Закрытый список: длинный текст обрезается, а не растягивает поле */
-  .cbi-section-table td:nth-child(2) cbi-dropdown:not([open]) > ul,
-  .cbi-section-table td:nth-child(2) .cbi-dropdown:not([open]) > ul {
-    min-width: 0 !important;
-  }
-  .cbi-section-table td:nth-child(2) cbi-dropdown:not([open]) > ul > li,
-  .cbi-section-table td:nth-child(2) .cbi-dropdown:not([open]) > ul > li {
-    min-width: 0 !important;
-    max-width: 100% !important;
-    overflow: hidden !important;
-    text-overflow: ellipsis !important;
-    white-space: nowrap !important;
-  }
-  /* Открытый список: по ширине самого длинного пункта, чтобы названия читались полностью */
-  .cbi-section-table td:nth-child(2) cbi-dropdown[open] > ul:not(.preview),
-  .cbi-section-table td:nth-child(2) .cbi-dropdown[open] > ul:not(.preview) {
-    min-width: 100% !important;
-    width: max-content !important;
-    max-width: 260px !important;
-  }
-
-  /* Кол 3 (HWID): комфортная ширина для аккуратной строки без сплющивания */
-  .cbi-section-table th:nth-child(3),
-  .cbi-section-table td:nth-child(3) {
-    width: 135px !important;
-    min-width: 125px !important;
-    max-width: 145px !important;
-    font-size: 11px !important;
-    line-height: 1.25 !important;
-  }
-  .cbi-section-table td:nth-child(3) .subconv-code-cell {
-    white-space: nowrap !important;
-    overflow: hidden !important;
-    text-overflow: ellipsis !important;
-    max-width: 135px !important;
-    display: inline-block !important;
-  }
-
-  /* Кол 4 (OS): достаточная ширина */
-  .cbi-section-table th:nth-child(4),
-  .cbi-section-table td:nth-child(4) {
-    width: 90px !important;
-    min-width: 85px !important;
-    max-width: 100px !important;
-    font-size: 11px !important;
-    line-height: 1.25 !important;
-  }
-  .cbi-section-table td:nth-child(4) .subconv-code-cell {
-    white-space: nowrap !important;
-    overflow: hidden !important;
-    text-overflow: ellipsis !important;
-    max-width: 90px !important;
-    display: inline-block !important;
-  }
-
-  /* Кол 5 (Модель): достаточная ширина для названия устройства */
-  .cbi-section-table th:nth-child(5),
-  .cbi-section-table td:nth-child(5) {
-    width: 110px !important;
-    min-width: 100px !important;
-    max-width: 125px !important;
-    font-size: 11px !important;
-    line-height: 1.25 !important;
-  }
-  .cbi-section-table td:nth-child(5) .subconv-code-cell {
-    white-space: nowrap !important;
-    overflow: hidden !important;
-    text-overflow: ellipsis !important;
-    max-width: 110px !important;
-    display: inline-block !important;
-  }
-
-  /* Кол 6 (Обновление): компактный drop-down интервала Cron */
-  .cbi-section-table th:nth-child(6),
-  .cbi-section-table td:nth-child(6) {
-    width: 80px !important;
-    min-width: 75px !important;
-    max-width: 85px !important;
-  }
-  .cbi-section-table td:nth-child(6) select,
-  .cbi-section-table td:nth-child(6) .cbi-input-select,
-  .cbi-section-table td:nth-child(6) cbi-dropdown,
-  .cbi-section-table td:nth-child(6) .cbi-dropdown {
-    width: 100% !important;
-    max-width: 80px !important;
-    min-width: 70px !important;
-    height: 28px !important;
-    line-height: 20px !important;
-    font-size: 11px !important;
-    padding: 2px 4px !important;
-    box-sizing: border-box !important;
-    border-radius: 4px !important;
-  }
-
-  /* Кол 7 (Тип выдачи): четкий компактный статус */
-  .cbi-section-table th:nth-child(7),
-  .cbi-section-table td:nth-child(7) {
-    width: 95px !important;
-    min-width: 85px !important;
-    max-width: 105px !important;
-    font-size: 11px !important;
-    line-height: 1.25 !important;
-    white-space: nowrap !important;
-  }
-
-  /* Кол 8: Данные подписки (строго 3 строки без раздувания ширины) */
-  .cbi-section-table th:nth-child(8),
-  .cbi-section-table td:nth-child(8) {
-    width: 175px !important;
-    min-width: 165px !important;
-    white-space: nowrap !important;
-  }
-
-  /* 6. Кнопки действий справа: компактные 28x28 */
-  .cbi-section-table th:nth-last-child(-n+5),
-  .cbi-section-table td:nth-last-child(-n+5) {
-    width: 32px !important;
-    min-width: 32px !important;
-    max-width: 34px !important;
-    padding: 3px 1px !important;
-    text-align: center !important;
-    white-space: nowrap !important;
-  }
-  .cbi-section-table td:nth-last-child(-n+5) .cbi-button,
-  .cbi-section-table td:nth-last-child(-n+5) a.cbi-button {
-    margin: 0 !important;
-    padding: 3px 6px !important;
-    font-size: 13px !important;
-    min-width: 28px !important;
-    width: 28px !important;
-    height: 28px !important;
-    line-height: 20px !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    box-sizing: border-box !important;
-  }
-
-  /* 7. Скрываем дублирующую строку кнопки очистки логов и нижнюю панель действий LuCI */
-  div[id*="_clear_log"]:not(button):not(input) {
-    display: none !important;
-  }
-  .cbi-page-actions {
-    display: none !important;
-  }
-
-  /* 8. Кнопка "Добавить подписку" по центру внизу формы */
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]),
-  .subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) {
-    display: flex !important;
-    justify-content: center !important;
-    align-items: center !important;
-    margin-top: 22px !important;
-    margin-bottom: 6px !important;
-    padding: 0 !important;
-  }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-value-title,
-  .subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-value-title {
-    display: none !important;
-  }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-value-field,
-  .subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-value-field {
-    display: flex !important;
-    justify-content: center !important;
-    align-items: center !important;
-    margin: 0 !important;
-    padding: 0 !important;
-  }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-button,
-  .subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-button {
-    min-width: 240px !important;
-    height: 38px !important;
-    padding: 6px 28px !important;
-    font-size: 14px !important;
-    font-weight: 500 !important;
-    background: #059669 !important;
-    border: 1px solid #10b981 !important;
-    color: #ffffff !important;
-    border-radius: 6px !important;
-    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.25) !important;
-    cursor: pointer !important;
-    letter-spacing: 0.3px !important;
-    transition: all 0.2s ease !important;
-  }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-button:hover,
-  .subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-button:hover {
-    background: #10b981 !important;
-    box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4) !important;
-    transform: translateY(-1px) !important;
-  }
-  fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:not(:has(button[name*="_add"])) .cbi-value-title,
-  .subconv-add-section .cbi-value:not(:has(button[name*="_add"])) .cbi-value-title {
-    display: block !important;
-    visibility: visible !important;
-    opacity: 1 !important;
-  }
-
-  /* 9. ЖУРНАЛ ОТЛАДКИ: 100% ширина, идеально выровненная со всеми блоками страницы */
-  #cbi-subconv-global,
-  fieldset.cbi-section:has(#subconv-debug-log),
-  fieldset.cbi-section:has(textarea) {
-    width: 100% !important;
-    max-width: 100% !important;
-    min-width: 100% !important;
-    box-sizing: border-box !important;
-    margin-left: 0 !important;
-    margin-right: 0 !important;
-    padding-left: 0 !important;
-    padding-right: 0 !important;
-  }
-  fieldset.cbi-section:has(#subconv-debug-log) .cbi-section-node,
-  fieldset.cbi-section:has(#subconv-debug-log) .cbi-value,
-  fieldset.cbi-section:has(#subconv-debug-log) .cbi-value-field,
-  .cbi-section:has(#subconv-debug-log) .cbi-value-field,
-  #cbi-subconv-global .cbi-section-node,
-  #cbi-subconv-global .cbi-value,
-  #cbi-subconv-global .cbi-value-field {
-    width: 100% !important;
-    max-width: 100% !important;
-    min-width: 100% !important;
-    margin-left: 0 !important;
-    margin-right: 0 !important;
-    padding-left: 0 !important;
-    padding-right: 0 !important;
-    box-sizing: border-box !important;
-    display: block !important;
-  }
-  fieldset.cbi-section:has(#subconv-debug-log) .cbi-value-title {
-    display: none !important;
-  }
-  #subconv-debug-log {
-    width: 100% !important;
-    max-width: 100% !important;
-    min-width: 100% !important;
-    box-sizing: border-box !important;
-    display: block !important;
-    height: 350px !important;
-    background: #1a1b26 !important;
-    color: #a9b1d6 !important;
-    font-family: monospace !important;
-    font-size: 13px !important;
-    padding: 10px !important;
-    border: 1px solid #333 !important;
-    margin-top: 10px !important;
-    border-radius: 4px !important;
-  }
-  #subconv-max-log-size {
-    width: 95px !important;
-    min-width: 90px !important;
-    max-width: 105px !important;
-  }
-
-  /* 8. Диалоговое окно подтверждения дубликата URL */
-  .subconv-modal-overlay {
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0, 0, 0, 0.65);
-    z-index: 99999;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    backdrop-filter: blur(2px);
-  }
-  .subconv-modal-box {
-    background: #ffffff;
-    color: #1e293b;
-    border-radius: 8px;
-    padding: 24px;
-    max-width: 480px;
-    width: 90%;
-    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
-    font-size: 14px;
-    line-height: 1.5;
-    box-sizing: border-box;
-  }
-  body.dark-mode .subconv-modal-box,
-  [data-theme="dark"] .subconv-modal-box {
-    background: #1e222a;
-    color: #e2e8f0;
-    border: 1px solid #334155;
-  }
-  .subconv-modal-actions {
-    margin-top: 20px;
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-  }
+.subconv-add-section.expanded,
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]).expanded {
+max-height: 900px !important;
+opacity: 1 !important;
+overflow: visible !important;
+visibility: visible !important;
+border: 1px solid rgba(16, 185, 129, 0.45) !important;
+background: rgba(16, 185, 129, 0.03) !important;
+border-radius: 8px !important;
+padding: 15px 20px 20px 20px !important;
+margin-top: 15px !important;
+margin-bottom: 25px !important;
+box-shadow: 0 4px 16px rgba(16, 185, 129, 0.08) !important;
+transition: max-height 0.8s cubic-bezier(0.4, 0, 0.2, 1),
+opacity 0.8s ease,
+padding 0.8s ease,
+margin 0.8s ease !important;
+}
+.subconv-add-section:not(.expanded),
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]):not(.expanded) {
+max-height: 0 !important;
+opacity: 0 !important;
+overflow: hidden !important;
+padding-top: 0 !important;
+padding-bottom: 0 !important;
+margin-top: 0 !important;
+margin-bottom: 0 !important;
+border-top-width: 0 !important;
+border-bottom-width: 0 !important;
+border-left: 1px solid transparent !important;
+border-right: 1px solid transparent !important;
+pointer-events: none !important;
+visibility: hidden !important;
+transition: max-height 0.8s cubic-bezier(0.4, 0, 0.2, 1),
+opacity 0.6s ease,
+padding 0.8s ease,
+margin 0.8s ease,
+visibility 0.8s !important;
+}
+.subconv-add-section h3,
+.subconv-add-section legend,
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) > h3,
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) > legend {
+display: none !important;
+}
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field {
+display: flex !important;
+flex-direction: row !important;
+align-items: center !important;
+gap: 15px !important;
+flex-wrap: nowrap !important;
+}
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field > input:not(.cbi-button),
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field > select,
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field > .cbi-dropdown,
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-field > cbi-dropdown {
+width: 250px !important;
+max-width: 250px !important;
+min-width: 250px !important;
+flex: 0 0 250px !important;
+box-sizing: border-box !important;
+}
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value-description {
+margin: 0 !important;
+padding: 0 !important;
+opacity: 0.8 !important;
+font-size: 12px !important;
+white-space: nowrap !important;
+flex: 1 1 auto !important;
+}
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-dropdown ul > li {
+white-space: normal !important;
+line-height: 1.3 !important;
+}
+#btn-check-ver, #btn-do-update {
+font-size: 13px !important;
+padding: 4px 10px !important;
+height: 30px !important;
+line-height: 20px !important;
+box-sizing: border-box !important;
+vertical-align: middle !important;
+}
+#subconv-decrypt-bar {
+display: inline-flex !important;
+align-items: center !important;
+gap: 8px !important;
+margin: 0 0 0 15px !important;
+padding: 0 !important;
+background: transparent !important;
+border: none !important;
+box-shadow: none !important;
+font-size: 13px !important;
+font-weight: normal !important;
+vertical-align: middle !important;
+}
+#subconv-decrypt-bar::before {
+content: "|" !important;
+opacity: 0.3 !important;
+margin-right: 6px !important;
+font-weight: normal !important;
+}
+#subconv-decrypt-bar .cbi-value-title {
+width: auto !important;
+padding: 0 !important;
+margin: 0 !important;
+font-size: 13px !important;
+font-weight: 500 !important;
+opacity: 0.9 !important;
+display: inline !important;
+}
+#subconv-decrypt-bar .cbi-value-field {
+display: inline-flex !important;
+align-items: center !important;
+gap: 8px !important;
+width: auto !important;
+margin: 0 !important;
+padding: 0 !important;
+}
+#subconv-decrypt-bar .cbi-value-description {
+margin: 0 !important;
+padding: 0 !important;
+font-size: 12px !important;
+white-space: nowrap !important;
+}
+#subconv-decrypt-bar .cbi-button {
+margin: 0 !important;
+font-size: 12px !important;
+padding: 3px 10px !important;
+height: 26px !important;
+line-height: 18px !important;
+}
+.cbi-section-table {
+width: 100% !important;
+max-width: 100% !important;
+table-layout: auto !important;
+border-collapse: separate !important;
+border-spacing: 0 !important;
+box-sizing: border-box !important;
+}
+.cbi-section-table th,
+.cbi-section-table td {
+padding: 6px 4px !important;
+vertical-align: middle !important;
+text-align: left !important;
+box-sizing: border-box !important;
+}
+.cbi-section-table th {
+font-size: 12px !important;
+font-weight: 600 !important;
+opacity: 0.85 !important;
+white-space: nowrap !important;
+border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
+}
+.cbi-section-table tr.cbi-section-table-row td,
+.cbi-section-table tr[class*="cbi-section-table-row"] td {
+border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+}
+.subconv-code-cell {
+display: inline-block !important;
+position: relative !important;
+max-width: 100% !important;
+padding: 2px 5px !important;
+border-radius: 4px !important;
+border: 1px solid transparent !important;
+background: transparent !important;
+font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace !important;
+font-size: 11px !important;
+line-height: 1.25 !important;
+cursor: pointer !important;
+transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease !important;
+box-sizing: border-box !important;
+user-select: none !important;
+}
+.subconv-code-cell:hover {
+border: 1px solid rgba(125, 125, 125, 0.35) !important;
+background: rgba(125, 125, 125, 0.12) !important;
+box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15) !important;
+}
+@keyframes subconvCellGhost {
+0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+20% { transform: scale(1.04); text-shadow: -4px 0 3px rgba(59, 130, 246, 0.95), 4px 0 3px rgba(16, 185, 129, 0.95); box-shadow: -3px 0 0 1px rgba(59, 130, 246, 0.6), 3px 0 0 1px rgba(16, 185, 129, 0.6); }
+45% { transform: scale(1.03); text-shadow: -5px 0 5px rgba(59, 130, 246, 0.8), 5px 0 5px rgba(16, 185, 129, 0.8); box-shadow: 0 0 14px rgba(16, 185, 129, 0.65); }
+70% { transform: scale(1.01); text-shadow: -2px 0 2px rgba(59, 130, 246, 0.5), 2px 0 2px rgba(16, 185, 129, 0.5); }
+100% { transform: scale(1); text-shadow: none; box-shadow: none; }
+}
+.subconv-cell-copied {
+animation: subconvCellGhost 0.6s ease-out !important;
+}
+.subconv-copied-badge {
+position: absolute !important;
+top: -26px !important;
+left: 50% !important;
+transform: translateX(-50%) !important;
+background: #059669 !important;
+color: #ffffff !important;
+font-size: 11px !important;
+font-weight: 600 !important;
+padding: 2px 8px !important;
+border-radius: 4px !important;
+white-space: nowrap !important;
+pointer-events: none !important;
+z-index: 1000 !important;
+box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important;
+animation: subconvBadgeFloat 1.2s ease-out forwards !important;
+}
+@keyframes subconvBadgeFloat {
+0% { opacity: 0; transform: translate(-50%, 4px) scale(0.85); }
+15% { opacity: 1; transform: translate(-50%, 0) scale(1); }
+75% { opacity: 1; transform: translate(-50%, -2px) scale(1); }
+100% { opacity: 0; transform: translate(-50%, -10px) scale(0.9); }
+}
+.subconv-spin {
+display: inline-block !important;
+animation: subconvSpin 1s linear infinite !important;
+}
+@keyframes subconvSpin {
+from { transform: rotate(0deg); }
+to { transform: rotate(360deg); }
+}
+.cbi-section-table th:nth-child(1),
+.cbi-section-table td:nth-child(1) {
+min-width: 125px !important;
+max-width: 165px !important;
+}
+.cbi-section-table td:nth-child(1) .subconv-code-cell {
+word-break: break-all !important;
+}
+.cbi-section-table th:nth-child(2),
+.cbi-section-table td:nth-child(2) {
+width: 110px !important;
+min-width: 100px !important;
+max-width: 115px !important;
+overflow: visible !important;
+}
+.cbi-section-table td:nth-child(2) cbi-dropdown,
+.cbi-section-table td:nth-child(2) .cbi-dropdown {
+width: 100% !important;
+min-width: 0 !important;
+max-width: 110px !important;
+box-sizing: border-box !important;
+}
+.cbi-section-table td:nth-child(2) cbi-dropdown:not([open]) > ul,
+.cbi-section-table td:nth-child(2) .cbi-dropdown:not([open]) > ul {
+min-width: 0 !important;
+}
+.cbi-section-table td:nth-child(2) cbi-dropdown:not([open]) > ul > li,
+.cbi-section-table td:nth-child(2) .cbi-dropdown:not([open]) > ul > li {
+min-width: 0 !important;
+max-width: 100% !important;
+overflow: hidden !important;
+text-overflow: ellipsis !important;
+white-space: nowrap !important;
+}
+.cbi-section-table td:nth-child(2) cbi-dropdown[open] > ul:not(.preview),
+.cbi-section-table td:nth-child(2) .cbi-dropdown[open] > ul:not(.preview) {
+min-width: 100% !important;
+width: max-content !important;
+max-width: 260px !important;
+}
+.cbi-section-table th:nth-child(3),
+.cbi-section-table td:nth-child(3) {
+width: 125px !important;
+min-width: 115px !important;
+max-width: 135px !important;
+font-size: 11px !important;
+line-height: 1.25 !important;
+}
+.cbi-section-table td:nth-child(3) .subconv-code-cell {
+overflow-wrap: break-word !important;
+word-break: break-word !important;
+}
+.cbi-section-table th:nth-child(4),
+.cbi-section-table td:nth-child(4) {
+width: 85px !important;
+min-width: 80px !important;
+max-width: 95px !important;
+font-size: 11px !important;
+line-height: 1.25 !important;
+}
+.cbi-section-table td:nth-child(4) .subconv-code-cell {
+white-space: normal !important;
+word-break: normal !important;
+}
+.cbi-section-table th:nth-child(5),
+.cbi-section-table td:nth-child(5) {
+width: 95px !important;
+min-width: 90px !important;
+max-width: 110px !important;
+font-size: 11px !important;
+line-height: 1.25 !important;
+}
+.cbi-section-table td:nth-child(5) .subconv-code-cell {
+white-space: normal !important;
+word-break: normal !important;
+}
+.cbi-section-table th:nth-child(6),
+.cbi-section-table td:nth-child(6) {
+width: 85px !important;
+min-width: 80px !important;
+max-width: 90px !important;
+}
+.cbi-section-table td:nth-child(6) select,
+.cbi-section-table td:nth-child(6) .cbi-input-select,
+.cbi-section-table td:nth-child(6) cbi-dropdown,
+.cbi-section-table td:nth-child(6) .cbi-dropdown {
+width: 100% !important;
+max-width: 85px !important;
+min-width: 75px !important;
+height: 28px !important;
+line-height: 20px !important;
+font-size: 11px !important;
+padding: 2px 4px !important;
+box-sizing: border-box !important;
+border-radius: 4px !important;
+}
+.cbi-section-table th:nth-child(7),
+.cbi-section-table td:nth-child(7) {
+width: 90px !important;
+min-width: 80px !important;
+max-width: 95px !important;
+font-size: 11px !important;
+line-height: 1.25 !important;
+}
+.cbi-section-table th:nth-child(8),
+.cbi-section-table td:nth-child(8) {
+width: 175px !important;
+min-width: 165px !important;
+white-space: nowrap !important;
+}
+.cbi-section-table th:nth-last-child(-n+5),
+.cbi-section-table td:nth-last-child(-n+5) {
+width: 32px !important;
+min-width: 32px !important;
+max-width: 34px !important;
+padding: 3px 1px !important;
+text-align: center !important;
+white-space: nowrap !important;
+}
+.cbi-section-table td:nth-last-child(-n+5) .cbi-button,
+.cbi-section-table td:nth-last-child(-n+5) a.cbi-button {
+margin: 0 !important;
+padding: 3px 6px !important;
+font-size: 13px !important;
+min-width: 28px !important;
+width: 28px !important;
+height: 28px !important;
+line-height: 20px !important;
+display: inline-flex !important;
+align-items: center !important;
+justify-content: center !important;
+box-sizing: border-box !important;
+}
+div[id*="_clear_log"]:not(button):not(input) {
+display: none !important;
+}
+.cbi-page-actions {
+display: none !important;
+}
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]),
+.subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) {
+display: flex !important;
+justify-content: center !important;
+align-items: center !important;
+margin-top: 22px !important;
+margin-bottom: 6px !important;
+padding: 0 !important;
+}
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-value-title,
+.subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-value-title {
+display: none !important;
+}
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-value-field,
+.subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-value-field {
+display: flex !important;
+justify-content: center !important;
+align-items: center !important;
+margin: 0 !important;
+padding: 0 !important;
+}
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-button,
+.subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-button {
+min-width: 240px !important;
+height: 38px !important;
+padding: 6px 28px !important;
+font-size: 14px !important;
+font-weight: 500 !important;
+background: #059669 !important;
+border: 1px solid #10b981 !important;
+color: #ffffff !important;
+border-radius: 6px !important;
+box-shadow: 0 2px 8px rgba(16, 185, 129, 0.25) !important;
+cursor: pointer !important;
+letter-spacing: 0.3px !important;
+transition: all 0.2s ease !important;
+}
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-button:hover,
+.subconv-add-section .cbi-value:has(button[name*="_add"], input[name*="_add"]) .cbi-button:hover {
+background: #10b981 !important;
+box-shadow: 0 4px 14px rgba(16, 185, 129, 0.4) !important;
+transform: translateY(-1px) !important;
+}
+fieldset.cbi-section:has([name="cbid.subconv.add.sub_id"]) .cbi-value:not(:has(button[name*="_add"])) .cbi-value-title,
+.subconv-add-section .cbi-value:not(:has(button[name*="_add"])) .cbi-value-title {
+display: block !important;
+visibility: visible !important;
+opacity: 1 !important;
+}
+#cbi-subconv-global,
+fieldset.cbi-section:has(#subconv-debug-log),
+fieldset.cbi-section:has(textarea) {
+width: 100% !important;
+max-width: 100% !important;
+min-width: 100% !important;
+box-sizing: border-box !important;
+margin-left: 0 !important;
+margin-right: 0 !important;
+padding-left: 0 !important;
+padding-right: 0 !important;
+}
+fieldset.cbi-section:has(#subconv-debug-log) .cbi-section-node,
+fieldset.cbi-section:has(#subconv-debug-log) .cbi-value,
+fieldset.cbi-section:has(#subconv-debug-log) .cbi-value-field,
+.cbi-section:has(#subconv-debug-log) .cbi-value-field,
+#cbi-subconv-global .cbi-section-node,
+#cbi-subconv-global .cbi-value,
+#cbi-subconv-global .cbi-value-field {
+width: 100% !important;
+max-width: 100% !important;
+min-width: 100% !important;
+margin-left: 0 !important;
+margin-right: 0 !important;
+padding-left: 0 !important;
+padding-right: 0 !important;
+box-sizing: border-box !important;
+display: block !important;
+}
+fieldset.cbi-section:has(#subconv-debug-log) .cbi-value-title {
+display: none !important;
+}
+#subconv-debug-log {
+width: 100% !important;
+max-width: 100% !important;
+min-width: 100% !important;
+box-sizing: border-box !important;
+display: block !important;
+height: 350px !important;
+background: #1a1b26 !important;
+color: #a9b1d6 !important;
+font-family: monospace !important;
+font-size: 13px !important;
+padding: 10px !important;
+border: 1px solid #333 !important;
+margin-top: 10px !important;
+border-radius: 4px !important;
+}
+.subconv-modal-overlay {
+position: fixed;
+top: 0; left: 0; right: 0; bottom: 0;
+background: rgba(0, 0, 0, 0.65);
+z-index: 99999;
+display: flex;
+align-items: center;
+justify-content: center;
+backdrop-filter: blur(2px);
+}
+.subconv-modal-box {
+background: #ffffff;
+color: #1e293b;
+border-radius: 8px;
+padding: 24px;
+max-width: 480px;
+width: 90%;
+box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+font-size: 14px;
+line-height: 1.5;
+box-sizing: border-box;
+}
+body.dark-mode .subconv-modal-box,
+[data-theme="dark"] .subconv-modal-box {
+background: #1e222a;
+color: #e2e8f0;
+border: 1px solid #334155;
+}
+.subconv-modal-actions {
+margin-top: 20px;
+display: flex;
+justify-content: flex-end;
+gap: 10px;
+}
 </style>]===]
 
 local JS_TWEAKS_PART1 = [===[<script>
-    function showToast(msg) {
-        if (!msg) return;
-        var toast = document.createElement('div');
-        toast.className = 'subconv-global-toast';
-        toast.innerText = msg;
-        toast.style.cssText = 'position:fixed; bottom:25px; right:25px; background:rgba(20,24,35,0.95); color:#fff; padding:10px 18px; border-radius:6px; border:1px solid #10b981; box-shadow:0 6px 20px rgba(0,0,0,0.4); font-size:13px; font-weight:500; z-index:999999; opacity:0; transition:opacity 0.25s ease, transform 0.25s ease; transform:translateY(10px); pointer-events:none;';
-        document.body.appendChild(toast);
-        void toast.offsetWidth;
-        toast.style.opacity = '1';
-        toast.style.transform = 'translateY(0)';
-        setTimeout(function() {
-            toast.style.opacity = '0';
-            toast.style.transform = 'translateY(10px)';
-            setTimeout(function() { if (toast && toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
-        }, 3000);
-    }
-    window.showToast = showToast;
-
     function fallbackCopy(text, cb) {
         var ta = document.createElement('textarea');
         ta.value = text;
@@ -1654,14 +1550,20 @@ local JS_TWEAKS_PART1 = [===[<script>
                     var remote = match[1];
                     var current = ']===]
 
-local JS_TWEAKS_PART2 = [===[';
+local JS_TWEAKS_PART2 = [===[
+';
                     var verText = document.getElementById('plugin-ver-text');
                     var btnUpd = document.getElementById('btn-do-update');
                     if(remote !== current) {
                         verText.innerHTML = 'v' + current + ' &rarr; <b style="color:#ff9800;">v' + remote + '</b>';
                         if(btnUpd) {
-                            btnUpd.style.display = 'inline-flex';
+                            var btnToggle = document.getElementById('btn-toggle-add-form');
+                            if(btnToggle && btnToggle.parentNode) {
+                                btnToggle.parentNode.insertBefore(btnUpd, btnToggle);
+                            }
+                            btnUpd.innerHTML = '📥 Обновить плагин (v' + remote + ')';
                             btnUpd.title = 'Установить обновление плагина (v' + remote + ')';
+                            btnUpd.style.display = 'inline-flex';
                         }
                         showToast('Доступно обновление: v' + remote);
                     } else {
@@ -1674,7 +1576,7 @@ local JS_TWEAKS_PART2 = [===[';
                 }
             })
             .catch(e => {
-                showToast('Ошибка проверки: ' + (e.message || 'сеть недоступна'));
+                alert('Ошибка проверки версии: ' + e.message);
             })
             .finally(() => {
                 btnCheck.innerHTML = '🔄';
@@ -1682,17 +1584,13 @@ local JS_TWEAKS_PART2 = [===[';
                 btnCheck.title = 'Проверить обновления плагина';
             });
     }
-
     function doPluginUpdate() {
         var btnUpd = document.getElementById('btn-do-update');
         if(!btnUpd || btnUpd.disabled) return;
-        if(!confirm('Обновить плагин Subconv до актуальной версии?')) return;
-
         btnUpd.disabled = true;
-        btnUpd.innerHTML = '⏳';
+        btnUpd.innerHTML = '<span class="subconv-spin">🔄</span> Обновление...';
         btnUpd.title = 'Установка обновления плагина...';
         showToast('Загрузка и установка обновления плагина (10-15 сек)...');
-
         var updateUrl = window.location.pathname.replace(/\/+$/, '') + '/self_update';
         fetch(updateUrl, { method: 'POST', cache: 'no-store' })
             .then(function(r) { return r.json(); })
@@ -1703,9 +1601,9 @@ local JS_TWEAKS_PART2 = [===[';
                         window.location.reload();
                     }, 1500);
                 } else {
-                    alert('Ошибка обновления: ' + (res.message || 'Сбой скрипта'));
+                    showToast('Ошибка обновления: ' + (res.message || 'Сбой скрипта'));
                     btnUpd.disabled = false;
-                    btnUpd.innerHTML = '📥';
+                    btnUpd.innerHTML = '📥 Обновить плагин';
                     btnUpd.title = 'Установить обновление плагина';
                 }
             })
@@ -1716,8 +1614,6 @@ local JS_TWEAKS_PART2 = [===[';
                 }, 3000);
             });
     }
-
-    // Асинхронное получение свежих строк журнала отладки без перезагрузки страницы
     function refreshDebugLog() {
         var logEl = document.getElementById('subconv-debug-log');
         if (!logEl) return;
@@ -1737,11 +1633,9 @@ local JS_TWEAKS_PART2 = [===[';
             })
             .catch(function() {});
     }
-
     function initHeaderAndSections() {
         var subHdr = null;
         var logHdr = null;
-
         document.querySelectorAll('h3, legend').forEach(function(h) {
             if (h.innerText && h.innerText.indexOf('Добавить новую подписку') !== -1) {
                 h.style.setProperty('display', 'none', 'important');
@@ -1750,10 +1644,8 @@ local JS_TWEAKS_PART2 = [===[';
             if (h.innerText && h.innerText.indexOf('Активные подписки') !== -1) subHdr = h;
             if (h.innerText && h.innerText.indexOf('Журнал отладки') !== -1) logHdr = h;
         });
-
         var addSection = document.querySelector('fieldset:has([name="cbid.subconv.add.sub_id"])') ||
                          document.querySelector('#cbi-subconv-add:not(:has(textarea))');
-
         var decryptBtn = document.querySelector('[name*="_dl_decrypt"]');
         if (decryptBtn && subHdr) {
             var decryptRow = decryptBtn.closest('.cbi-value');
@@ -1765,45 +1657,7 @@ local JS_TWEAKS_PART2 = [===[';
                 subHdr.style.gap = '12px';
                 subHdr.appendChild(decryptRow);
             }
-            if (!decryptBtn.dataset.ajaxAttached) {
-                decryptBtn.dataset.ajaxAttached = 'true';
-                decryptBtn.type = 'button';
-                decryptBtn.onclick = function(e) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    if (decryptBtn.disabled) return false;
-                    var origText = decryptBtn.value || decryptBtn.innerText || 'Скачать / Обновить';
-                    decryptBtn.disabled = true;
-                    if (decryptBtn.tagName === 'INPUT') decryptBtn.value = '⏳ Загрузка...';
-                    else decryptBtn.innerText = '⏳ Загрузка...';
-
-                    var dlUrl = window.location.pathname.replace(/\/+$/, '') + '/dl_decrypt';
-                    fetch(dlUrl, { method: 'POST', cache: 'no-store' })
-                        .then(function(r) { return r.json(); })
-                        .then(function(res) {
-                            if (res && res.status === 'ok') {
-                                showToast('Дешифратор успешно установлен (' + (res.version || 'ok') + ')');
-                                var desc = decryptRow ? decryptRow.querySelector('.cbi-value-description, [class*="description"]') : null;
-                                if (desc) {
-                                    desc.innerHTML = "<span style='color:#4caf50; font-weight:bold;'>✅ Установлен (" + (res.version || 'ok') + ")</span>";
-                                }
-                            } else {
-                                showToast('Ошибка: ' + (res && res.message ? res.message : 'не удалось загрузить'));
-                            }
-                        })
-                        .catch(function(err) {
-                            showToast('Ошибка сети при загрузке дешифратора');
-                        })
-                        .finally(function() {
-                            decryptBtn.disabled = false;
-                            if (decryptBtn.tagName === 'INPUT') decryptBtn.value = origText;
-                            else decryptBtn.innerText = origText;
-                        });
-                    return false;
-                };
-            }
         }
-
         var btnClear = document.querySelector('[name*="_clear_log"]');
         if (logHdr && btnClear) {
             var clearRow = btnClear.closest('.cbi-value') || document.querySelector('div[id*="_clear_log"]');
@@ -1814,21 +1668,17 @@ local JS_TWEAKS_PART2 = [===[';
                 logHdr.style.gap = '10px';
                 btnClear.style.cssText = 'margin: 0; font-size: 12px; padding: 3px 10px; height: 26px; line-height: 18px; cursor: pointer; vertical-align: middle;';
                 logHdr.appendChild(btnClear);
-
                 if (!document.getElementById('subconv-log-size-wrap')) {
                     var sizeWrap = document.createElement('div');
                     sizeWrap.id = 'subconv-log-size-wrap';
                     sizeWrap.style.cssText = 'display: inline-flex; align-items: center; gap: 6px; margin-left: 10px; font-size: 12px; font-weight: normal;';
-
                     var sizeLabel = document.createElement('span');
                     sizeLabel.innerText = 'Макс. размер:';
                     sizeLabel.style.opacity = '0.85';
-
                     var sizeSel = document.createElement('select');
                     sizeSel.id = 'subconv-max-log-size';
                     sizeSel.className = 'cbi-input-select';
                     sizeSel.style.cssText = 'font-size: 12px; height: 26px; padding: 2px 6px; border-radius: 3px; cursor: pointer; width: 95px !important; min-width: 90px !important; max-width: 105px !important;';
-
                     var presets = [
                         { v: '128', t: '128 КБ' },
                         { v: '256', t: '256 КБ' },
@@ -1837,7 +1687,6 @@ local JS_TWEAKS_PART2 = [===[';
                         { v: '2048', t: '2048 КБ' },
                         { v: '4096', t: '4096 КБ' }
                     ];
-
                     var logEl = document.getElementById('subconv-debug-log');
                     var curKb = (logEl && logEl.getAttribute('data-max-kb')) || '1024';
                     var found = false;
@@ -1855,12 +1704,10 @@ local JS_TWEAKS_PART2 = [===[';
                         customOpt.selected = true;
                         sizeSel.insertBefore(customOpt, sizeSel.firstChild);
                     }
-
                     var customChoice = document.createElement('option');
                     customChoice.value = 'custom';
                     customChoice.innerText = 'Свой...';
                     sizeSel.appendChild(customChoice);
-
                     sizeSel.onchange = function() {
                         var val = sizeSel.value;
                         if (val === 'custom') {
@@ -1892,13 +1739,10 @@ local JS_TWEAKS_PART2 = [===[';
                             })
                             .catch(function() {});
                     };
-
                     sizeWrap.appendChild(sizeLabel);
                     sizeWrap.appendChild(sizeSel);
                     logHdr.appendChild(sizeWrap);
                 }
-
-                // Очистка лога через AJAX без перезагрузки страницы
                 btnClear.onclick = function(e) {
                     e.preventDefault();
                     e.stopPropagation();
@@ -1907,7 +1751,6 @@ local JS_TWEAKS_PART2 = [===[';
                     var origText = btnClear.value || btnClear.innerText || 'Очистить лог';
                     if (btnClear.tagName === 'INPUT') btnClear.value = 'Очистка...';
                     else btnClear.innerText = 'Очистка...';
-
                     var clearUrl = window.location.pathname.replace(/\/+$/, '') + '/clear_log';
                     fetch(clearUrl, { method: 'POST', cache: 'no-store' })
                         .then(function(r) { return r.json(); })
@@ -1924,157 +1767,52 @@ local JS_TWEAKS_PART2 = [===[';
                         });
                     return false;
                 };
-
                 var oldRefresh = document.getElementById('btn-refresh-log');
                 if (oldRefresh) oldRefresh.remove();
             }
         }
-
         if (addSection && !addSection.dataset.spoilerInit) {
             addSection.dataset.spoilerInit = 'true';
             addSection.classList.add('subconv-add-section');
-
             var btnToggle = document.getElementById('btn-toggle-add-form');
             if (!btnToggle) {
                 btnToggle = document.createElement('button');
                 btnToggle.type = 'button';
                 btnToggle.id = 'btn-toggle-add-form';
                 btnToggle.style.cssText = 'background: #059669; border: 1px solid #10b981; color: #ffffff; border-radius: 4px; padding: 4px 14px; font-size: 13px; height: 30px; line-height: 20px; margin-left: 12px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; box-sizing: border-box; transition: background 0.2s;';
-                
                 btnToggle.onmouseenter = function() { btnToggle.style.background = '#10b981'; };
                 btnToggle.onmouseleave = function() { btnToggle.style.background = '#059669'; };
-
                 var btnCheck = document.getElementById('btn-check-ver');
                 var btnUpd = document.getElementById('btn-do-update');
                 if (btnCheck && btnCheck.parentNode) {
-                    var insertRef = (btnUpd && btnUpd.nextSibling) || (btnCheck && btnCheck.nextSibling);
-                    if (insertRef) {
-                        btnCheck.parentNode.insertBefore(btnToggle, insertRef);
-                    } else {
-                        btnCheck.parentNode.appendChild(btnToggle);
+                    btnCheck.parentNode.appendChild(btnToggle);
+                    if (btnUpd) {
+                        btnCheck.parentNode.insertBefore(btnUpd, btnToggle);
                     }
                 }
             }
-
             function updateFormVisibility() {
                 var isExp = addSection.classList.contains('expanded');
                 if (btnToggle) {
                     btnToggle.innerHTML = (isExp ? '▼' : '▶') + ' Добавить новую подписку';
                 }
             }
-
             if (btnToggle) {
                 btnToggle.onclick = function() {
                     addSection.classList.toggle('expanded');
                     updateFormVisibility();
                 };
             }
-
             if (addSection.querySelector('.cbi-value-error') || document.querySelector('.cbi-message-reset, .alert-message')) {
                 addSection.classList.add('expanded');
             }
-
-            var btnSubmitAdd = addSection.querySelector('button[name*="_add"], input[name*="_add"]');
-            if (btnSubmitAdd && !btnSubmitAdd.dataset.valInit) {
-                btnSubmitAdd.dataset.valInit = 'true';
-                btnSubmitAdd.addEventListener('click', function(e) {
-                    var idInp = document.querySelector('[name="cbid.subconv.add.sub_id"]');
-                    var urlInp = document.querySelector('[name="cbid.subconv.add.url"]');
-                    if (!idInp || !urlInp) return;
-
-                    var idVal = (idInp.value || '').trim();
-                    var urlVal = (urlInp.value || '').trim();
-
-                    if (!idVal) {
-                        alert('Ошибка: Укажите имя подписки (ID)!');
-                        idInp.focus();
-                        e.preventDefault();
-                        e.stopPropagation();
-                        return false;
-                    }
-
-                    if (!/^[a-zA-Z0-9_]+$/.test(idVal)) {
-                        alert('Ошибка: Имя подписки (ID) должно содержать только латинские буквы, цифры и знак подчеркивания!');
-                        idInp.focus();
-                        e.preventDefault();
-                        e.stopPropagation();
-                        return false;
-                    }
-
-                    if (idVal === 'add' || idVal === 'global' || idVal === 'subscription') {
-                        alert('Ошибка: Имя "' + idVal + '" зарезервировано системой!');
-                        idInp.focus();
-                        e.preventDefault();
-                        e.stopPropagation();
-                        return false;
-                    }
-
-                    if (document.querySelector('.subconv-info-cell[data-sub="' + idVal + '"]')) {
-                        alert('Ошибка: Подписка с именем "' + idVal + '" уже существует!');
-                        idInp.focus();
-                        e.preventDefault();
-                        e.stopPropagation();
-                        return false;
-                    }
-
-                    if (!urlVal) {
-                        alert('Ошибка: Укажите URL подписки!');
-                        urlInp.focus();
-                        e.preventDefault();
-                        e.stopPropagation();
-                        return false;
-                    }
-
-                    if (/\s/.test(urlVal)) {
-                        alert('Ошибка: URL подписки не должен содержать пробелы!');
-                        urlInp.focus();
-                        e.preventDefault();
-                        e.stopPropagation();
-                        return false;
-                    }
-
-                    if (!/^(https?:\/\/[a-zA-Z0-9.\-_]+|happ:\/\/|v2raytun:\/\/)/i.test(urlVal)) {
-                        alert('Ошибка: Некорректный URL подписки! Ссылка должна начинаться с http://, https://, happ:// или v2raytun://');
-                        urlInp.focus();
-                        e.preventDefault();
-                        e.stopPropagation();
-                        return false;
-                    }
-
-                    var cleanUrl = urlVal.replace(/\/+$/, '').toLowerCase();
-                    var isDup = false;
-                    var dupId = '';
-                    document.querySelectorAll('.cbi-section-table [data-sub-url], .cbi-section-table [data-copy]').forEach(function(el) {
-                        var existing = (el.getAttribute('data-sub-url') || el.getAttribute('data-copy') || '').trim();
-                        if (existing && existing.replace(/\/+$/, '').toLowerCase() === cleanUrl) {
-                            isDup = true;
-                            var row = el.closest('tr');
-                            if (row) {
-                                var sCell = row.querySelector('.subconv-info-cell');
-                                dupId = sCell ? (sCell.getAttribute('data-sub') || '') : '';
-                            }
-                        }
-                    });
-
-                    if (isDup) {
-                        alert('Ошибка: Подписка с таким URL уже добавлена' + (dupId ? ' (ID: ' + dupId + ')' : '') + '!');
-                        urlInp.focus();
-                        e.preventDefault();
-                        e.stopPropagation();
-                        return false;
-                    }
-                }, true);
-            }
-
             updateFormVisibility();
         }
     }
-
     function initTableChangeHandlers() {
         var table = document.querySelector('.cbi-section-table');
         if (!table || table.dataset.handlersInit) return;
         table.dataset.handlersInit = 'true';
-
         function syncField(target) {
             if (!target) return;
             var el = target.closest('[name*="cbid.subconv."]') || target;
@@ -2103,17 +1841,13 @@ local JS_TWEAKS_PART2 = [===[';
                 }
             }
         }
-
         table.addEventListener('change', function(e) { syncField(e.target); }, true);
         table.addEventListener('cbi-dropdown-change', function(e) { syncField(e.target); }, true);
         table.addEventListener('blur', function(e) { syncField(e.target); }, true);
     }
-
-
     function showDuplicateConfirmModal(dupId, onConfirm) {
         var old = document.getElementById('subconv-dup-modal');
         if (old) old.remove();
-
         var overlay = document.createElement('div');
         overlay.id = 'subconv-dup-modal';
         overlay.className = 'subconv-modal-overlay';
@@ -2133,41 +1867,32 @@ local JS_TWEAKS_PART2 = [===[';
                     '<button type="button" class="cbi-button cbi-button-apply" id="subconv-dup-ok" style="padding: 5px 14px; font-size: 13px; margin-left: 8px;">Да, добавить</button>' +
                 '</div>' +
             '</div>';
-
         document.body.appendChild(overlay);
-
         document.getElementById('subconv-dup-cancel').onclick = function() {
             overlay.remove();
         };
-
         document.getElementById('subconv-dup-ok').onclick = function() {
             overlay.remove();
             if (onConfirm) onConfirm();
         };
     }
-
     function initDuplicateValidation() {
         var addBtn = document.querySelector('[name="cbid.subconv.add._add"]');
         if (!addBtn || addBtn.dataset.dupValidationInit) return;
         addBtn.dataset.dupValidationInit = 'true';
-
         addBtn.addEventListener('click', function(e) {
             if (addBtn.dataset.confirmedDup === 'true') {
                 addBtn.dataset.confirmedDup = '';
                 return true;
             }
-
             var idInp = document.querySelector('[name="cbid.subconv.add.sub_id"]');
             var urlInp = document.querySelector('[name="cbid.subconv.add.url"]');
             if (!idInp || !urlInp) return true;
-
             var idVal = idInp.value ? idInp.value.trim() : '';
             var urlVal = urlInp.value ? urlInp.value.trim() : '';
             if (!idVal || !urlVal) return true;
-
             var cleanUrl = urlVal.replace(/\/+$/, '').toLowerCase();
             var dup = null;
-
             document.querySelectorAll('tr[id^="cbi-subconv-"]').forEach(function(row) {
                 if (dup) return;
                 var sId = row.id.replace(/^cbi-subconv-/, '');
@@ -2179,7 +1904,6 @@ local JS_TWEAKS_PART2 = [===[';
                     }
                 }
             });
-
             if (dup) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -2202,18 +1926,15 @@ local JS_TWEAKS_PART2 = [===[';
             }
         }, true);
     }
-
     function alignFormAndTable() {
         initHeaderAndSections();
         initTableChangeHandlers();
         initDuplicateValidation();
-
         document.querySelectorAll('.cbi-section-descr, span').forEach(function(s) {
             if (s.innerText && s.innerText.indexOf('процесс может занять некоторое время') !== -1) {
                 s.remove();
             }
         });
-
         document.querySelectorAll('tr[id^="cbi-subconv-"]').forEach(function(row) {
             if (row.classList.contains('cbi-section-table-empty')) return;
             [1, 3, 4, 5].forEach(function(colIdx) {
@@ -2229,8 +1950,6 @@ local JS_TWEAKS_PART2 = [===[';
                 }
             });
         });
-
-        // Выравнивание журнала отладки строго по ширине таблицы (на всю ширину)
         var logTa = document.getElementById('subconv-debug-log');
         if (logTa) {
             var cur = logTa.parentElement;
@@ -2255,7 +1974,6 @@ local JS_TWEAKS_PART2 = [===[';
                 cur = cur.parentElement;
             }
         }
-
         var subIdInput = document.querySelector('[name="cbid.subconv.add.sub_id"]');
         if (subIdInput) {
             var subIdRow = subIdInput.closest('.cbi-value');
@@ -2271,7 +1989,6 @@ local JS_TWEAKS_PART2 = [===[';
                 }
             }
         }
-
         var addSection = document.querySelector('fieldset:has([name="cbid.subconv.add.sub_id"])') ||
                          document.querySelector('#cbi-subconv-add:not(:has(textarea))');
         if (addSection) {
@@ -2285,7 +2002,6 @@ local JS_TWEAKS_PART2 = [===[';
                     field.style.setProperty('align-items', 'center', 'important');
                     field.style.gap = '15px';
                     field.style.setProperty('flex-wrap', 'nowrap', 'important');
-
                     if (desc) {
                         field.appendChild(desc);
                         desc.style.setProperty('margin', '0', 'important');
@@ -2293,7 +2009,6 @@ local JS_TWEAKS_PART2 = [===[';
                         desc.style.setProperty('font-size', '12px', 'important');
                         desc.style.setProperty('white-space', 'nowrap', 'important');
                     }
-
                     var ctrl = field.querySelector('input:not(.cbi-button), select, .cbi-dropdown, cbi-dropdown') || field.firstElementChild;
                     if (ctrl && !ctrl.classList.contains('cbi-button')) {
                         ctrl.style.setProperty('width', '250px', 'important');
@@ -2306,19 +2021,16 @@ local JS_TWEAKS_PART2 = [===[';
             });
         }
     }
-
     function triggerSubUpdate(btn, subId) {
         if (!subId) return;
         if (btn) {
             btn.disabled = true;
             btn.innerHTML = '<span class="subconv-spin">🔄</span>';
         }
-
         var statusEl = document.querySelector('.subconv-status-cell[data-sub="' + subId + '"]');
         if (statusEl) {
             statusEl.innerHTML = '<span class="subconv-status-updating" data-sub="' + subId + '" style="display:inline-flex; align-items:center; gap:4px; font-weight:500; color:#2563eb;"><span class="subconv-spin">🔄</span> Обновление...</span>';
         }
-
         var row = btn ? btn.closest('tr') : null;
         var uaVal = '';
         if (row) {
@@ -2336,24 +2048,20 @@ local JS_TWEAKS_PART2 = [===[';
                 }
             }
         }
-
         var url = window.location.pathname.replace(/\/+$/, '') + '/update_ajax?sub=' + encodeURIComponent(subId);
         if (uaVal) {
             url += '&ua=' + encodeURIComponent(uaVal);
         }
         fetch(url, { cache: 'no-store' })
             .catch(function(e) { console.error('Update trigger error', e); });
-
         refreshDebugLog();
         initStatusWatcher();
     }
-
     function triggerUpdateAll(btn) {
         if (btn) {
             btn.disabled = true;
             btn.innerHTML = '<span class="subconv-spin">🔄</span> Обновление...';
         }
-
         document.querySelectorAll('button[onclick*="triggerSubUpdate"]').forEach(function(b) {
             var m = b.getAttribute('onclick').match(/triggerSubUpdate\(this,\s*'([^']+)'\)/);
             if (m && m[1]) {
@@ -2366,7 +2074,6 @@ local JS_TWEAKS_PART2 = [===[';
                 }
             }
         });
-
         var table = document.querySelector('.cbi-section-table');
         if (table) {
             table.querySelectorAll('[name*=".user_agent"]').forEach(function(inp) {
@@ -2383,34 +2090,26 @@ local JS_TWEAKS_PART2 = [===[';
                 }
             });
         }
-
         var url = window.location.pathname.replace(/\/+$/, '') + '/update_ajax?all=1';
         fetch(url, { cache: 'no-store' })
             .catch(function(e) { console.error('Update all trigger error', e); });
-
         refreshDebugLog();
         initStatusWatcher();
     }
-
     function initStatusWatcher() {
         if (window.__subconv_watcher_running) return;
         var targets = document.querySelectorAll('.subconv-status-updating');
         if (!targets.length) return;
         window.__subconv_watcher_running = true;
-
         var attempts = 0;
-        // Подписки обновляются по очереди, поэтому время ожидания растёт с их количеством
         var maxAttempts = 20 + 10 * Math.max(0, targets.length - 1);
         var isRequestPending = false;
         var retryDelay = 2000;
-
         var logTimer = setInterval(refreshDebugLog, 1500);
-
         function stopWatcher(reason) {
             window.__subconv_watcher_running = false;
             if (logTimer) { clearInterval(logTimer); logTimer = null; }
             refreshDebugLog();
-
             var btnAll = document.querySelector('button[onclick*="triggerUpdateAll"]');
             if (btnAll) {
                 btnAll.disabled = false;
@@ -2426,29 +2125,23 @@ local JS_TWEAKS_PART2 = [===[';
                 });
             }
         }
-
         function poll() {
             if (!window.__subconv_watcher_running) return;
-
             if (document.hidden) {
                 setTimeout(poll, 3000);
                 return;
             }
-
             attempts++;
             if (attempts > maxAttempts) {
                 stopWatcher('timeout');
                 return;
             }
-
             if (isRequestPending) {
                 setTimeout(poll, 1000);
                 return;
             }
-
             isRequestPending = true;
             var statusUrl = window.location.pathname.replace(/\/+$/, '') + '/status';
-
             fetch(statusUrl, { cache: 'no-store' })
                 .then(function(res) {
                     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -2458,7 +2151,6 @@ local JS_TWEAKS_PART2 = [===[';
                     isRequestPending = false;
                     retryDelay = 2000;
                     var stillUpdating = false;
-
                     document.querySelectorAll('.subconv-status-updating').forEach(function(el) {
                         var sub = el.getAttribute('data-sub');
                         if (data && data[sub]) {
@@ -2469,12 +2161,10 @@ local JS_TWEAKS_PART2 = [===[';
                                     statusCell.classList.remove('subconv-status-updating');
                                     statusCell.innerHTML = st;
                                 }
-
                                 var infoCell = document.querySelector('.subconv-info-cell[data-sub="' + sub + '"]');
                                 if (infoCell && data[sub].info_html) {
                                     infoCell.innerHTML = data[sub].info_html;
                                 }
-
                                 document.querySelectorAll('button[onclick*="triggerSubUpdate"]').forEach(function(b) {
                                     if (b.getAttribute('onclick').indexOf("'" + sub + "'") !== -1) {
                                         b.disabled = false;
@@ -2486,9 +2176,7 @@ local JS_TWEAKS_PART2 = [===[';
                             }
                         }
                     });
-
                     refreshDebugLog();
-
                     if (!document.querySelectorAll('.subconv-status-updating').length || !stillUpdating) {
                         stopWatcher('done');
                     } else {
@@ -2501,10 +2189,8 @@ local JS_TWEAKS_PART2 = [===[';
                     setTimeout(poll, retryDelay);
                 });
         }
-
         setTimeout(poll, 1000);
     }
-
     setTimeout(function() {
         var title = document.querySelector('h2');
         if(title && title.innerText.includes('Subconv')) {
