@@ -1,12 +1,12 @@
 #!/bin/sh
 # =====================================================================
-# Subconv Installer & Updater (v0.3.19)
+# Subconv Installer & Updater (v0.3.20)
 # =====================================================================
 # Автоматический скрипт установки и обновления плагина Subconv для OpenWrt.
 # Поддерживает архитектуры: x86_64, aarch64, arm, mips.
 # =====================================================================
 
-VERSION="0.3.19"
+VERSION="0.3.20"
 
 # Цвета для вывода в терминал
 RED='\033[0;31m'
@@ -144,11 +144,6 @@ mkdir -p /usr/lib/lua/luci/controller
 mkdir -p /usr/lib/lua/luci/model/cbi
 mkdir -p /usr/share/luci/menu.d
 mkdir -p /usr/share/rpcd/acl.d
-
-if [ ! -f /usr/libexec/happ-decrypt ]; then
-    echo "📦 Загрузка дешифратора happ-decrypt..."
-    curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt" -o /usr/libexec/happ-decrypt 2>/dev/null && chmod +x /usr/libexec/happ-decrypt || true
-fi
 
 cat << 'EOF' > /usr/libexec/subconv-update.sh
 #!/usr/bin/lua
@@ -977,7 +972,7 @@ end
 -- ==========================================
 -- Константы для HTML и JavaScript
 -- ==========================================
-local current_ver = "0.3.19"
+local current_ver = "0.3.20"
 
 local title_html = [[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;" id="plugin-ver-text">v]] .. current_ver .. [[</span> <button type="button" class="cbi-button" style="padding: 3px 6px; font-size: 13px; margin-left: 8px; min-width: 28px; width: 28px; height: 28px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; vertical-align: middle; cursor: pointer;" id="btn-check-ver" onclick="checkPluginVersion()" title="Проверить обновления плагина">🔄</button><button type="button" class="cbi-button cbi-button-apply" style="padding: 4px 12px; font-size: 13px; margin-left: 10px; height: 30px; line-height: 20px; display: none; align-items: center; gap: 5px; box-sizing: border-box; vertical-align: middle; cursor: pointer; background: #2563eb; border: 1px solid #3b82f6; color: #fff; border-radius: 4px; font-weight: 500;" id="btn-do-update" onclick="doPluginUpdate()" title="Установить обновление плагина">📥 Обновить плагин</button>]]
 
@@ -1474,6 +1469,26 @@ gap: 10px;
 </style>]===]
 
 local JS_TWEAKS_PART1 = [===[<script>
+    function showToast(msg) {
+        if (!msg) return;
+        var existing = document.querySelector('.subconv-global-toast');
+        if (existing) { existing.remove(); }
+        var toast = document.createElement('div');
+        toast.className = 'subconv-global-toast';
+        toast.innerText = msg;
+        toast.style.cssText = 'position:fixed; bottom:25px; right:25px; background:rgba(20,24,35,0.95); color:#fff; padding:10px 18px; border-radius:6px; border:1px solid #10b981; box-shadow:0 6px 20px rgba(0,0,0,0.4); font-size:13px; font-weight:500; z-index:999999; opacity:0; transition:opacity 0.25s ease, transform 0.25s ease; transform:translateY(10px); pointer-events:none;';
+        document.body.appendChild(toast);
+        void toast.offsetWidth;
+        toast.style.opacity = '1';
+        toast.style.transform = 'translateY(0)';
+        setTimeout(function() {
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateY(10px)';
+            setTimeout(function() { if (toast && toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
+        }, 3000);
+    }
+    window.showToast = showToast;
+
     function fallbackCopy(text, cb) {
         var ta = document.createElement('textarea');
         ta.value = text;
@@ -1532,14 +1547,24 @@ local JS_TWEAKS_PART1 = [===[<script>
         btnCheck.innerHTML = '⏳';
         btnCheck.disabled = true;
         btnCheck.title = 'Проверка обновлений...';
-        fetch('https://api.github.com/repos/asimoneo/subconv/commits/main', {cache: 'no-store'})
-            .then(res => res.json())
-            .then(data => {
-                if(!data.sha) throw new Error("No commit");
-                return fetch('https://raw.githubusercontent.com/asimoneo/subconv/' + data.sha + '/install.sh', {cache: 'no-store'});
-            })
-            .then(res => res.text())
-            .then(text => {
+
+        var fetchScript = function() {
+            return fetch('https://api.github.com/repos/asimoneo/subconv/commits/main', {cache: 'no-store'})
+                .then(function(res) { return res.json(); })
+                .then(function(data) {
+                    if (data && data.sha) {
+                        return fetch('https://raw.githubusercontent.com/asimoneo/subconv/' + data.sha + '/install.sh?_=' + Date.now(), {cache: 'no-store'});
+                    }
+                    return fetch('https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/install.sh?_=' + Date.now(), {cache: 'no-store'});
+                })
+                .catch(function() {
+                    return fetch('https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/install.sh?_=' + Date.now(), {cache: 'no-store'});
+                });
+        };
+
+        fetchScript()
+            .then(function(res) { return res.text(); })
+            .then(function(text) {
                 var match = text.match(/VERSION=["']([^"']+)["']/);
                 if(match) {
                     var remote = match[1];
@@ -1567,13 +1592,13 @@ local JS_TWEAKS_PART2 = [===[
                         showToast('У вас установлена актуальная версия плагина');
                     }
                 } else {
-                    throw new Error("No VERSION tag");
+                    throw new Error("Не найден тег версии");
                 }
             })
-            .catch(e => {
-                alert('Ошибка проверки версии: ' + e.message);
+            .catch(function(e) {
+                showToast('Ошибка проверки версии: ' + (e.message || 'сеть недоступна'));
             })
-            .finally(() => {
+            .finally(function() {
                 btnCheck.innerHTML = '🔄';
                 btnCheck.disabled = false;
                 btnCheck.title = 'Проверить обновления плагина';
@@ -1642,7 +1667,45 @@ local JS_TWEAKS_PART2 = [===[
         var addSection = document.querySelector('fieldset:has([name="cbid.subconv.add.sub_id"])') ||
                          document.querySelector('#cbi-subconv-add:not(:has(textarea))');
         var decryptBtn = document.querySelector('[name*="_dl_decrypt"]');
-        if (decryptBtn && subHdr) {
+        if (decryptBtn && !decryptBtn.dataset.ajaxInit) {
+            decryptBtn.dataset.ajaxInit = 'true';
+            decryptBtn.onclick = function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                if (decryptBtn.disabled) return false;
+                decryptBtn.disabled = true;
+                var origText = decryptBtn.value || decryptBtn.innerText || 'Загрузить';
+                if (decryptBtn.tagName === 'INPUT') decryptBtn.value = 'Загрузка...';
+                else decryptBtn.innerText = 'Загрузка...';
+                showToast('Загрузка дешифратора happ-decrypt...');
+                var dlUrl = window.location.pathname.replace(/\/+$/, '') + '/dl_decrypt';
+                fetch(dlUrl, { method: 'POST', cache: 'no-store' })
+                    .then(function(r) { return r.json(); })
+                    .then(function(res) {
+                        if (res && res.status === 'ok') {
+                            showToast('Дешифратор успешно установлен!');
+                            var bar = document.getElementById('subconv-decrypt-bar');
+                            if (bar) {
+                                bar.innerHTML = '<span style="color:#059669; font-weight:500;">Установлен ✅</span>';
+                            }
+                            var btnRow = decryptBtn.closest('.cbi-value');
+                            if (btnRow) btnRow.style.display = 'none';
+                        } else {
+                            showToast('Ошибка: ' + (res && res.message ? res.message : 'не удалось загрузить'));
+                        }
+                    })
+                    .catch(function(err) {
+                        showToast('Ошибка сети при загрузке дешифратора');
+                    })
+                    .finally(function() {
+                        decryptBtn.disabled = false;
+                        if (decryptBtn.tagName === 'INPUT') decryptBtn.value = origText;
+                        else decryptBtn.innerText = origText;
+                    });
+                return false;
+            };
+        }
+        if (decryptBtn) {
             var decryptRow = decryptBtn.closest('.cbi-value');
             if (decryptRow && decryptRow.parentNode !== subHdr) {
                 decryptRow.id = 'subconv-decrypt-bar';
