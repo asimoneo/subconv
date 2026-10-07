@@ -1,12 +1,12 @@
 #!/bin/sh
 # =====================================================================
-# Subconv Installer & Updater (v0.3.17)
+# Subconv Installer & Updater (v0.3.18)
 # =====================================================================
 # Автоматический скрипт установки и обновления плагина Subconv для OpenWrt.
 # Поддерживает архитектуры: x86_64, aarch64, arm, mips.
 # =====================================================================
 
-VERSION="0.3.17"
+VERSION="0.3.18"
 
 # Цвета для вывода в терминал
 RED='\033[0;31m'
@@ -140,11 +140,6 @@ mkdir -p /usr/lib/lua/luci/controller
 mkdir -p /usr/lib/lua/luci/model/cbi
 mkdir -p /usr/share/luci/menu.d
 mkdir -p /usr/share/rpcd/acl.d
-
-if [ ! -f /usr/libexec/happ-decrypt ]; then
-    echo "📦 Загрузка дешифратора happ-decrypt..."
-    curl -fsSL "https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt" -o /usr/libexec/happ-decrypt 2>/dev/null && chmod +x /usr/libexec/happ-decrypt || true
-fi
 
 cat << 'EOF' > /usr/libexec/subconv-update.sh
 #!/usr/bin/lua
@@ -618,6 +613,7 @@ function index()
     entry({"admin", "services", "subconv", "set_log_size"}, call("action_set_log_size")).leaf = true
     entry({"admin", "services", "subconv", "clear_log"}, call("action_clear_log")).leaf = true
     entry({"admin", "services", "subconv", "self_update"}, call("action_self_update")).leaf = true
+    entry({"admin", "services", "subconv", "dl_decrypt"}, call("action_dl_decrypt")).leaf = true
 end
 
 local function format_sub_info(id, uinfo)
@@ -865,6 +861,35 @@ function action_self_update()
         http.write('{"status":"error","message":"' .. snippet:gsub('"', '\\"') .. '"}')
     end
 end
+
+function action_dl_decrypt()
+    local http = require "luci.http"
+    local sys = require "luci.sys"
+    local nixio = require "nixio"
+
+    local cmd = "COMMIT_SHA=$(curl -sSL --connect-timeout 5 https://api.github.com/repos/asimoneo/subconv/commits/main 2>/dev/null | grep '\"sha\"' | head -n 1 | awk -F '\"' '{print $4}'); " ..
+                "if [ -n \"$COMMIT_SHA\" ]; then " ..
+                "curl -fsSL \"https://raw.githubusercontent.com/asimoneo/subconv/${COMMIT_SHA}/happ-decrypt\" -o /usr/libexec/happ-decrypt; " ..
+                "else " ..
+                "curl -fsSL \"https://raw.githubusercontent.com/asimoneo/subconv/refs/heads/main/happ-decrypt\" -o /usr/libexec/happ-decrypt; " ..
+                "fi; chmod +x /usr/libexec/happ-decrypt"
+    sys.call(cmd)
+
+    local bin_path = "/usr/libexec/happ-decrypt"
+    local bin_ver = nil
+    if nixio.fs.access(bin_path) then
+        local v_handle = io.popen(bin_path .. " --version 2>/dev/null")
+        bin_ver = v_handle and v_handle:read("*l") or "unknown"
+        if v_handle then v_handle:close() end
+    end
+
+    http.prepare_content("application/json")
+    if bin_ver then
+        http.write(string.format('{"status":"ok","version":"%s"}', bin_ver:gsub('"', '\\"')))
+    else
+        http.write('{"status":"error","message":"Не удалось загрузить дешифратор"}')
+    end
+end
 EOF
 
 cat << 'EOF' > /usr/lib/lua/luci/model/cbi/subconv.lua
@@ -956,7 +981,7 @@ end
 -- ==========================================
 -- Константы для HTML и JavaScript
 -- ==========================================
-local current_ver = "0.3.17"
+local current_ver = "0.3.18"
 
 local title_html = [[<a href="https://github.com/asimoneo/subconv" target="_blank" style="text-decoration:none; color:inherit; border-bottom: 1px dashed;">Subconv</a> <span style="font-size: 14px; opacity: 0.6; font-weight: normal; margin-left: 8px;" id="plugin-ver-text">v]] .. current_ver .. [[</span> <button type="button" class="cbi-button" style="padding: 3px 6px; font-size: 13px; margin-left: 8px; min-width: 28px; width: 28px; height: 28px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; vertical-align: middle; cursor: pointer;" id="btn-check-ver" onclick="checkPluginVersion()" title="Проверить обновления плагина">🔄</button><button type="button" class="cbi-button cbi-button-apply" style="padding: 3px 6px; font-size: 13px; margin-left: 6px; min-width: 28px; width: 28px; height: 28px; line-height: 20px; display: none; align-items: center; justify-content: center; box-sizing: border-box; vertical-align: middle; cursor: pointer; background: #2563eb; border-color: #3b82f6;" id="btn-do-update" onclick="doPluginUpdate()" title="Установить обновление плагина">📥</button>]]
 
@@ -1199,31 +1224,55 @@ local CSS_TWEAKS = [===[<style>
     to { transform: rotate(360deg); }
   }
 
+  /* Пустая таблица подписок: центрированное сообщение на всю ширину без полосок */
+  .cbi-section-table tr.cbi-section-table-empty,
+  .cbi-section-table tr.cbi-section-table-row.cbi-section-table-empty {
+    background: transparent !important;
+    border: none !important;
+  }
+  .cbi-section-table tr.cbi-section-table-empty td,
+  .cbi-section-table td.cbi-section-table-empty,
+  .cbi-section-table-empty td {
+    width: 100% !important;
+    min-width: 100% !important;
+    max-width: none !important;
+    text-align: center !important;
+    padding: 24px 10px !important;
+    border: none !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+    pointer-events: none !important;
+    user-select: none !important;
+    cursor: default !important;
+    color: rgba(255, 255, 255, 0.45) !important;
+    font-style: italic !important;
+    font-size: 12px !important;
+  }
+
   /* Кол 1 (URL): комфортный размер без растягивания таблицы */
   .cbi-section-table th:nth-child(1),
-  .cbi-section-table td:nth-child(1) {
-    min-width: 125px !important;
-    max-width: 165px !important;
+  .cbi-section-table td:nth-child(1):not(.cbi-section-table-empty) {
+    width: 155px !important;
+    min-width: 135px !important;
+    max-width: 175px !important;
   }
-  .cbi-section-table td:nth-child(1) .subconv-code-cell {
+  .cbi-section-table td:nth-child(1):not(.cbi-section-table-empty) .subconv-code-cell {
     word-break: break-all !important;
   }
 
-  /* Кол 2 (User-Agent): родной выпадающий список LuCI (cbi-dropdown) с возможностью ввести свой вариант.
-     Внешний вид остаётся как в теме OpenWrt, ограничивается только ширина: собственный min-width
-     у cbi-dropdown сбрасывается, иначе колонка раздувается до ~200px. */
+  /* Кол 2 (User-Agent): родной выпадающий список LuCI (cbi-dropdown) */
   .cbi-section-table th:nth-child(2),
   .cbi-section-table td:nth-child(2) {
-    width: 110px !important;
-    min-width: 100px !important;
-    max-width: 115px !important;
+    width: 140px !important;
+    min-width: 130px !important;
+    max-width: 155px !important;
     overflow: visible !important;
   }
   .cbi-section-table td:nth-child(2) cbi-dropdown,
-  .cbi-section-table td:nth-child(2) .cbi-dropdown {
+  .cbi-section-table td:nth-child(2) .cbi-dropdown,
+  .cbi-section-table td:nth-child(2) select {
     width: 100% !important;
     min-width: 0 !important;
-    max-width: 110px !important;
+    max-width: 140px !important;
     box-sizing: border-box !important;
   }
   /* Закрытый список: длинный текст обрезается, а не растягивает поле */
@@ -1247,62 +1296,71 @@ local CSS_TWEAKS = [===[<style>
     max-width: 260px !important;
   }
 
-  /* Кол 3 (HWID): комфортная ширина для переноса по дефису без сплющивания букв */
+  /* Кол 3 (HWID): комфортная ширина для аккуратной строки без сплющивания */
   .cbi-section-table th:nth-child(3),
   .cbi-section-table td:nth-child(3) {
-    width: 125px !important;
-    min-width: 115px !important;
-    max-width: 135px !important;
+    width: 135px !important;
+    min-width: 125px !important;
+    max-width: 145px !important;
     font-size: 11px !important;
     line-height: 1.25 !important;
   }
   .cbi-section-table td:nth-child(3) .subconv-code-cell {
-    overflow-wrap: break-word !important;
-    word-break: break-word !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    max-width: 135px !important;
+    display: inline-block !important;
   }
 
-  /* Кол 4 (OS): достаточная ширина для 2 строк */
+  /* Кол 4 (OS): достаточная ширина */
   .cbi-section-table th:nth-child(4),
   .cbi-section-table td:nth-child(4) {
-    width: 85px !important;
-    min-width: 80px !important;
-    max-width: 95px !important;
+    width: 90px !important;
+    min-width: 85px !important;
+    max-width: 100px !important;
     font-size: 11px !important;
     line-height: 1.25 !important;
   }
   .cbi-section-table td:nth-child(4) .subconv-code-cell {
-    white-space: normal !important;
-    word-break: normal !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    max-width: 90px !important;
+    display: inline-block !important;
   }
 
   /* Кол 5 (Модель): достаточная ширина для названия устройства */
   .cbi-section-table th:nth-child(5),
   .cbi-section-table td:nth-child(5) {
-    width: 95px !important;
-    min-width: 90px !important;
-    max-width: 110px !important;
+    width: 110px !important;
+    min-width: 100px !important;
+    max-width: 125px !important;
     font-size: 11px !important;
     line-height: 1.25 !important;
   }
   .cbi-section-table td:nth-child(5) .subconv-code-cell {
-    white-space: normal !important;
-    word-break: normal !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    max-width: 110px !important;
+    display: inline-block !important;
   }
 
   /* Кол 6 (Обновление): компактный drop-down интервала Cron */
   .cbi-section-table th:nth-child(6),
   .cbi-section-table td:nth-child(6) {
-    width: 85px !important;
-    min-width: 80px !important;
-    max-width: 90px !important;
+    width: 80px !important;
+    min-width: 75px !important;
+    max-width: 85px !important;
   }
   .cbi-section-table td:nth-child(6) select,
   .cbi-section-table td:nth-child(6) .cbi-input-select,
   .cbi-section-table td:nth-child(6) cbi-dropdown,
   .cbi-section-table td:nth-child(6) .cbi-dropdown {
     width: 100% !important;
-    max-width: 85px !important;
-    min-width: 75px !important;
+    max-width: 80px !important;
+    min-width: 70px !important;
     height: 28px !important;
     line-height: 20px !important;
     font-size: 11px !important;
@@ -1314,11 +1372,12 @@ local CSS_TWEAKS = [===[<style>
   /* Кол 7 (Тип выдачи): четкий компактный статус */
   .cbi-section-table th:nth-child(7),
   .cbi-section-table td:nth-child(7) {
-    width: 90px !important;
-    min-width: 80px !important;
-    max-width: 95px !important;
+    width: 95px !important;
+    min-width: 85px !important;
+    max-width: 105px !important;
     font-size: 11px !important;
     line-height: 1.25 !important;
+    white-space: nowrap !important;
   }
 
   /* Кол 8: Данные подписки (строго 3 строки без раздувания ширины) */
@@ -1462,6 +1521,11 @@ local CSS_TWEAKS = [===[<style>
     margin-top: 10px !important;
     border-radius: 4px !important;
   }
+  #subconv-max-log-size {
+    width: 95px !important;
+    min-width: 90px !important;
+    max-width: 105px !important;
+  }
 
   /* 8. Диалоговое окно подтверждения дубликата URL */
   .subconv-modal-overlay {
@@ -1501,6 +1565,24 @@ local CSS_TWEAKS = [===[<style>
 </style>]===]
 
 local JS_TWEAKS_PART1 = [===[<script>
+    function showToast(msg) {
+        if (!msg) return;
+        var toast = document.createElement('div');
+        toast.className = 'subconv-global-toast';
+        toast.innerText = msg;
+        toast.style.cssText = 'position:fixed; bottom:25px; right:25px; background:rgba(20,24,35,0.95); color:#fff; padding:10px 18px; border-radius:6px; border:1px solid #10b981; box-shadow:0 6px 20px rgba(0,0,0,0.4); font-size:13px; font-weight:500; z-index:999999; opacity:0; transition:opacity 0.25s ease, transform 0.25s ease; transform:translateY(10px); pointer-events:none;';
+        document.body.appendChild(toast);
+        void toast.offsetWidth;
+        toast.style.opacity = '1';
+        toast.style.transform = 'translateY(0)';
+        setTimeout(function() {
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateY(10px)';
+            setTimeout(function() { if (toast && toast.parentNode) toast.parentNode.removeChild(toast); }, 300);
+        }, 3000);
+    }
+    window.showToast = showToast;
+
     function fallbackCopy(text, cb) {
         var ta = document.createElement('textarea');
         ta.value = text;
@@ -1592,7 +1674,7 @@ local JS_TWEAKS_PART2 = [===[';
                 }
             })
             .catch(e => {
-                alert('Ошибка проверки версии: ' + e.message);
+                showToast('Ошибка проверки: ' + (e.message || 'сеть недоступна'));
             })
             .finally(() => {
                 btnCheck.innerHTML = '🔄';
@@ -1683,6 +1765,43 @@ local JS_TWEAKS_PART2 = [===[';
                 subHdr.style.gap = '12px';
                 subHdr.appendChild(decryptRow);
             }
+            if (!decryptBtn.dataset.ajaxAttached) {
+                decryptBtn.dataset.ajaxAttached = 'true';
+                decryptBtn.type = 'button';
+                decryptBtn.onclick = function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (decryptBtn.disabled) return false;
+                    var origText = decryptBtn.value || decryptBtn.innerText || 'Скачать / Обновить';
+                    decryptBtn.disabled = true;
+                    if (decryptBtn.tagName === 'INPUT') decryptBtn.value = '⏳ Загрузка...';
+                    else decryptBtn.innerText = '⏳ Загрузка...';
+
+                    var dlUrl = window.location.pathname.replace(/\/+$/, '') + '/dl_decrypt';
+                    fetch(dlUrl, { method: 'POST', cache: 'no-store' })
+                        .then(function(r) { return r.json(); })
+                        .then(function(res) {
+                            if (res && res.status === 'ok') {
+                                showToast('Дешифратор успешно установлен (' + (res.version || 'ok') + ')');
+                                var desc = decryptRow ? decryptRow.querySelector('.cbi-value-description, [class*="description"]') : null;
+                                if (desc) {
+                                    desc.innerHTML = "<span style='color:#4caf50; font-weight:bold;'>✅ Установлен (" + (res.version || 'ok') + ")</span>";
+                                }
+                            } else {
+                                showToast('Ошибка: ' + (res && res.message ? res.message : 'не удалось загрузить'));
+                            }
+                        })
+                        .catch(function(err) {
+                            showToast('Ошибка сети при загрузке дешифратора');
+                        })
+                        .finally(function() {
+                            decryptBtn.disabled = false;
+                            if (decryptBtn.tagName === 'INPUT') decryptBtn.value = origText;
+                            else decryptBtn.innerText = origText;
+                        });
+                    return false;
+                };
+            }
         }
 
         var btnClear = document.querySelector('[name*="_clear_log"]');
@@ -1708,7 +1827,7 @@ local JS_TWEAKS_PART2 = [===[';
                     var sizeSel = document.createElement('select');
                     sizeSel.id = 'subconv-max-log-size';
                     sizeSel.className = 'cbi-input-select';
-                    sizeSel.style.cssText = 'font-size: 12px; height: 26px; padding: 2px 6px; border-radius: 3px; cursor: pointer;';
+                    sizeSel.style.cssText = 'font-size: 12px; height: 26px; padding: 2px 6px; border-radius: 3px; cursor: pointer; width: 95px !important; min-width: 90px !important; max-width: 105px !important;';
 
                     var presets = [
                         { v: '128', t: '128 КБ' },
@@ -2095,14 +2214,17 @@ local JS_TWEAKS_PART2 = [===[';
             }
         });
 
-        document.querySelectorAll('.cbi-section-table tbody tr, .cbi-section-table tr.cbi-section-table-row').forEach(function(row) {
+        document.querySelectorAll('tr[id^="cbi-subconv-"]').forEach(function(row) {
+            if (row.classList.contains('cbi-section-table-empty')) return;
             [1, 3, 4, 5].forEach(function(colIdx) {
                 var cell = row.querySelector('td:nth-child(' + colIdx + ')');
                 if (cell) {
-                    var d = cell.querySelector('.subconv-code-cell') || cell.querySelector('div') || cell;
-                    d.title = 'Нажмите, чтобы скопировать';
-                    if (!d.onclick) {
-                        d.onclick = function() { copyCell(this, this.getAttribute('data-copy') || this.innerText.trim()); };
+                    var d = cell.querySelector('.subconv-code-cell');
+                    if (d) {
+                        d.title = 'Нажмите, чтобы скопировать';
+                        if (!d.onclick) {
+                            d.onclick = function() { copyCell(this, this.getAttribute('data-copy') || this.innerText.trim()); };
+                        }
                     }
                 }
             });
@@ -2341,9 +2463,10 @@ local JS_TWEAKS_PART2 = [===[';
                         var sub = el.getAttribute('data-sub');
                         if (data && data[sub]) {
                             var st = data[sub].last_type;
-                            if (st && st !== 'Обновление...') {
+                            if (st && st !== 'Обновление...' && st !== 'Ожидание...') {
                                 var statusCell = document.querySelector('.subconv-status-cell[data-sub="' + sub + '"]');
                                 if (statusCell) {
+                                    statusCell.classList.remove('subconv-status-updating');
                                     statusCell.innerHTML = st;
                                 }
 
@@ -2430,14 +2553,17 @@ f_ua.rmempty = true
 
 local f_hwid_opt = s_add:option(Value, "hwid", translate("HWID устройства"))
 f_hwid_opt.description = translate("Уникальный идентификатор устройства. Защищает от блокировки за мультиаккаунт.")
-f_hwid_opt:value(random_hwid, random_hwid .. " (Случайный - По умолчанию)")
-f_hwid_opt:value(sys_hwid, sys_hwid .. " (Ваш роутер)")
-f_hwid_opt.default = random_hwid
+f_hwid_opt:value("openwrt-router-default", "openwrt-router-default (По умолчанию)")
+f_hwid_opt:value(random_hwid, random_hwid .. " (Случайный)")
+if sys_hwid and sys_hwid ~= "openwrt-router-default" and sys_hwid ~= random_hwid then
+    f_hwid_opt:value(sys_hwid, sys_hwid .. " (ID роутера)")
+end
+f_hwid_opt.default = "openwrt-router-default"
 f_hwid_opt.rmempty = true
 
 local f_os = s_add:option(Value, "device_os", translate("OS Устройства"))
 f_os.description = translate("Операционная система, которая будет указана в заголовках запроса.")
-f_os:value(sys_os, sys_os)
+f_os:value(sys_os, sys_os .. " (По умолчанию)")
 f_os:value("Windows 11", "Windows 11")
 f_os:value("iOS 17.0", "iOS 17.0")
 f_os:value("Android 14", "Android 14")
@@ -2446,7 +2572,7 @@ f_os.rmempty = true
 
 local f_model = s_add:option(Value, "device_model", translate("Модель Устройства"))
 f_model.description = translate("Название устройства для передачи провайдеру.")
-f_model:value(sys_model, sys_model)
+f_model:value(sys_model, sys_model .. " (По умолчанию)")
 f_model:value("PC", "PC")
 f_model:value("iPhone 15 Pro", "iPhone 15 Pro")
 f_model:value("Android Phone", "Android Phone")
@@ -2460,7 +2586,7 @@ f_interval:value("30", translate("Каждые 30 мин"))
 f_interval:value("60", translate("Каждый 1 час"))
 f_interval:value("360", translate("Каждые 6 часов"))
 f_interval:value("720", translate("Каждые 12 часов"))
-f_interval:value("1440", translate("Раз в сутки"))
+f_interval:value("1440", translate("Раз в сутки (По умолчанию)"))
 f_interval.default = "1440"
 
 local f_decrypt = s_add:option(Button, "_dl_decrypt", translate("Дешифратор happ://"))
@@ -2559,7 +2685,8 @@ function btn_add.write(self, section)
     end
 
     local new_ua = m:formvalue("cbid.subconv.add.user_agent") or "SubConv/1.0"
-    local new_hwid = m:formvalue("cbid.subconv.add.hwid") or random_hwid
+    local new_hwid = m:formvalue("cbid.subconv.add.hwid") or "openwrt-router-default"
+    if new_hwid == "" then new_hwid = "openwrt-router-default" end
     local new_os = m:formvalue("cbid.subconv.add.device_os") or sys_os
     local new_model = m:formvalue("cbid.subconv.add.device_model") or sys_model
     local new_interval = m:formvalue("cbid.subconv.add.interval") or "1440"
@@ -2571,11 +2698,12 @@ function btn_add.write(self, section)
         device_os = new_os,
         device_model = new_model,
         interval = new_interval,
-        last_type = "Ожидание..."
+        last_type = "Обновление..."
     })
     uci:set("subconv", "add", "sub_id", "")
     uci:set("subconv", "add", "url", "")
     uci:commit("subconv")
+    os.remove("/tmp/subconv_status.json")
 
     local masked_u = new_url:gsub("^(%a+://[^/]+/)(.*)$", function(prefix, secret)
         if #secret > 8 then return prefix .. "••••" .. secret:sub(-4)
@@ -2757,8 +2885,8 @@ end
 local type_opt = s_list:option(DummyValue, "last_type", translate("Тип выдачи"))
 type_opt.rawhtml = true
 function type_opt.cfgvalue(self, section)
-    local val = uci:get("subconv", section, "last_type") or "Ожидание..."
-    if val == "Обновление..." then
+    local val = uci:get("subconv", section, "last_type") or "Обновление..."
+    if val == "Обновление..." or val == "Ожидание..." then
         return string.format('<span class="subconv-status-cell subconv-status-updating" data-sub="%s" style="display:inline-flex; align-items:center; gap:4px; font-weight:500; color:#2563eb;"><span class="subconv-spin">🔄</span> Обновление...</span>', section)
     end
     return string.format('<span class="subconv-status-cell" data-sub="%s">%s</span>', section, val)
